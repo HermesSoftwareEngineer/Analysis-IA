@@ -1074,21 +1074,31 @@ function RemessaBoletosAnalisePage() {
       .map((row) => {
         const contrato = row.contrato
         const analiseIa = String(contrato.analise_ia ?? '').trim()
+        const differenceClass = row.difference > 0 ? 'diff-positive' : row.difference < 0 ? 'diff-negative' : 'diff-neutral'
+        const statusValue = contrato.status ?? 'a_conferir'
+        const statusClass = statusValue === 'conferido' ? 'status-conferido' : 'status-a-conferir'
 
         return `
           <article class="ia-card">
             <div class="ia-grid">
-              <div><span class="meta">Codigo Contrato</span><strong>${escapeHtml(contrato.codigo_contrato || '-')}</strong></div>
-              <div><span class="meta">Locatario</span><strong>${escapeHtml(contrato.locatario || '-')}</strong></div>
-              <div><span class="meta">Locador</span><strong>${escapeHtml(contrato.locador || '-')}</strong></div>
-              <div><span class="meta">${escapeHtml(periodoFoco)}</span><strong>${escapeHtml(formatCurrency(row.subtotalFoco))}</strong></div>
-              <div><span class="meta">${escapeHtml(periodoComparacao)}</span><strong>${escapeHtml(formatCurrency(row.subtotalComparacao))}</strong></div>
-              <div><span class="meta">Diferenca</span><strong>${escapeHtml(formatCurrency(row.difference))}</strong></div>
-              <div><span class="meta">Status</span><strong>${escapeHtml(getStatusLabel(contrato.status))}</strong></div>
+              <div class="ia-item"><p class="ia-label">Codigo Contrato</p><p class="ia-text ia-text-strong">${escapeHtml(contrato.codigo_contrato || '-')}</p></div>
+              <div class="ia-item"><p class="ia-label">Locatario</p><p class="ia-text">${escapeHtml(contrato.locatario || '-')}</p></div>
+              <div class="ia-item"><p class="ia-label">Locador</p><p class="ia-text">${escapeHtml(contrato.locador || '-')}</p></div>
+              <div class="ia-item"><p class="ia-label">${escapeHtml(periodoFoco)}</p><p class="ia-text">${escapeHtml(formatCurrency(row.subtotalFoco))}</p></div>
+              <div class="ia-item"><p class="ia-label">${escapeHtml(periodoComparacao)}</p><p class="ia-text">${escapeHtml(formatCurrency(row.subtotalComparacao))}</p></div>
+              <div class="ia-item"><p class="ia-label">Diferenca</p><p class="ia-text ia-text-strong ${differenceClass}">${escapeHtml(formatCurrency(row.difference))}</p></div>
+              <div class="ia-item"><p class="ia-label">Status</p><span class="ia-status ${statusClass}">${escapeHtml(getStatusLabel(statusValue))}</span></div>
             </div>
-            <div class="ia-comment">
-              <p class="meta">Comentario da IA</p>
-              <div class="comment-text">${analiseIa ? formatPrintText(analiseIa) : '<span class="empty">Sem analise da IA</span>'}</div>
+            <div class="ia-comment-box">
+              <div class="ia-comment-head">
+                <svg class="ia-comment-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M12 3l1.6 3.9L17.5 8.5l-3.9 1.6L12 14l-1.6-3.9L6.5 8.5l3.9-1.6L12 3z" />
+                  <path d="M18.5 14l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9.9-2.1z" />
+                  <path d="M6 15.5l.7 1.7 1.8.8-1.8.8-.7 1.7-.8-1.7-1.7-.8 1.7-.8.8-1.7z" />
+                </svg>
+                <span>Comentario da IA</span>
+              </div>
+              <div class="ia-comment-text">${analiseIa ? formatPrintText(analiseIa) : '<span class="empty">Sem analise da IA</span>'}</div>
             </div>
           </article>
         `
@@ -1413,17 +1423,29 @@ function RemessaBoletosAnalisePage() {
             }
 
             .ia-card {
-              border: 1px solid #dbeafe;
-              border-radius: 12px;
+              border: 1px solid #e2e8f0;
+              border-radius: 16px;
               background: #fff;
-              padding: 12px;
+              padding: 16px;
             }
 
             .ia-grid {
               display: grid;
-              grid-template-columns: repeat(3, minmax(0, 1fr));
-              gap: 10px;
-              margin-bottom: 10px;
+              grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+              gap: 12px;
+            }
+
+            .ia-item {
+              min-width: 0;
+            }
+
+            .ia-label {
+              margin: 0;
+              font-size: 11px;
+              text-transform: uppercase;
+              letter-spacing: .04em;
+              color: #64748b;
+              font-weight: 700;
             }
 
             .meta {
@@ -1442,15 +1464,68 @@ function RemessaBoletosAnalisePage() {
               font-weight: 700;
             }
 
-            .ia-comment {
-              border: 1px solid #e2e8f0;
-              background: #f8fafc;
-              border-radius: 8px;
-              padding: 10px;
+            .ia-text {
+              margin: 4px 0 0;
+              font-size: 14px;
+              color: #334155;
+              line-height: 1.35;
             }
 
-            .comment-text {
-              font-size: 12px;
+            .ia-text-strong {
+              font-weight: 700;
+              color: #0f172a;
+            }
+
+            .ia-status {
+              margin-top: 6px;
+              display: inline-flex;
+              align-items: center;
+              border-radius: 999px;
+              padding: 4px 9px;
+              font-size: 11px;
+              font-weight: 700;
+              border: 1px solid transparent;
+            }
+
+            .status-conferido {
+              border-color: #86efac;
+              background: #f0fdf4;
+              color: #166534;
+            }
+
+            .status-a-conferir {
+              border-color: #fcd34d;
+              background: #fffbeb;
+              color: #92400e;
+            }
+
+            .ia-comment-box {
+              margin-top: 12px;
+              border: 1px solid #e2e8f0;
+              background: #f8fafc;
+              border-radius: 12px;
+              padding: 10px 12px;
+            }
+
+            .ia-comment-head {
+              display: flex;
+              align-items: center;
+              gap: 8px;
+              margin-bottom: 6px;
+              font-size: 11px;
+              font-weight: 700;
+              text-transform: uppercase;
+              letter-spacing: .04em;
+              color: #0e7490;
+            }
+
+            .ia-comment-icon {
+              width: 14px;
+              height: 14px;
+            }
+
+            .ia-comment-text {
+              font-size: 13px;
               color: #334155;
               line-height: 1.45;
             }
@@ -1490,7 +1565,7 @@ function RemessaBoletosAnalisePage() {
               .expanded-grid,
               .ia-grid,
               .row-summary-grid {
-                grid-template-columns: 1fr;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
               }
             }
           </style>
