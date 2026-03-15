@@ -171,6 +171,23 @@ function extractExternalUrl(dadosJson, contrato) {
   )
 }
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
+function getStatusLabel(status) {
+  return status === 'conferido' ? 'Conferido' : 'A conferir'
+}
+
+function formatPrintText(text) {
+  return escapeHtml(String(text ?? '').trim()).replace(/\n/g, '<br />')
+}
+
 function RemessaBoletosAnalisePage() {
   const { analiseId } = useParams()
   const { user } = useAuth()
@@ -203,6 +220,8 @@ function RemessaBoletosAnalisePage() {
   const [analysisOnlyWithoutIA, setAnalysisOnlyWithoutIA] = useState(false)
   const [analysisPromptNote, setAnalysisPromptNote] = useState('')
   const [analysisTargetKey, setAnalysisTargetKey] = useState('')
+  const [printModalOpen, setPrintModalOpen] = useState(false)
+  const [printExpandedPlacement, setPrintExpandedPlacement] = useState('final') // 'final' | 'inline'
   // editingObservacao: { [contratoId]: string } — rascunhos locais antes de salvar
   const [editingObservacao, setEditingObservacao] = useState({})
   // savingKey: key do contrato que está sendo salvo (status ou obs)
@@ -413,6 +432,40 @@ function RemessaBoletosAnalisePage() {
     () => iaCommentRows.filter((row) => !String(row.contrato.analise_ia ?? '').trim()).length,
     [iaCommentRows],
   )
+  const activeRowsForPrint = useMemo(
+    () => (viewMode === 'tabela' ? filteredAndSortedRows : iaCommentRows),
+    [viewMode, filteredAndSortedRows, iaCommentRows],
+  )
+  const printFilters = useMemo(() => {
+    const labels = []
+
+    if (search.trim()) {
+      labels.push(`Busca: ${search.trim()}`)
+    }
+
+    if (statusFilter === 'a_conferir') {
+      labels.push('Status: A conferir')
+    }
+    if (statusFilter === 'conferido') {
+      labels.push('Status: Conferido')
+    }
+
+    if (differenceFilter === 'com_diferenca') {
+      labels.push('Diferenca: Com diferenca')
+    }
+    if (differenceFilter === 'sem_diferenca') {
+      labels.push('Diferenca: Sem diferenca')
+    }
+
+    if (iaAnalysisFilter === 'com_analise_ia') {
+      labels.push('Analise IA: Com analise')
+    }
+    if (iaAnalysisFilter === 'sem_analise_ia') {
+      labels.push('Analise IA: Sem analise')
+    }
+
+    return labels
+  }, [search, statusFilter, differenceFilter, iaAnalysisFilter])
 
   const analysisTargetRow = useMemo(
     () => rows.find((row) => row.key === analysisTargetKey) ?? null,
@@ -824,6 +877,679 @@ function RemessaBoletosAnalisePage() {
     })
   }
 
+  function openPrintConfigModal() {
+    if (!activeRowsForPrint.length) {
+      return
+    }
+
+    setPrintModalOpen(true)
+  }
+
+  function closePrintConfigModal() {
+    setPrintModalOpen(false)
+  }
+
+  function executePrint({ expandedPlacement }) {
+    if (!analise) {
+      return
+    }
+
+    setErrorMessage('')
+
+    const periodoFoco = getPeriodoLabel(analise.mes_foco, analise.ano_foco)
+    const periodoComparacao = getPeriodoLabel(analise.mes_comparacao, analise.ano_comparacao)
+    const rows = activeRowsForPrint
+    const generatedAt = new Date().toLocaleString('pt-BR')
+    const modeLabel = viewMode === 'tabela' ? 'Tabela comparativa' : 'Comentarios da IA'
+    const filtersLabel = printFilters.length ? printFilters.join(' | ') : 'Sem filtros adicionais'
+    const isTableView = viewMode === 'tabela'
+    const useInlineExpandedLayout = isTableView && expandedPlacement === 'inline'
+
+    const buildMovimentosRowsHtml = (movimentos) => {
+      if (!Array.isArray(movimentos) || !movimentos.length) {
+        return '<tr><td colspan="4" class="empty-mini">Sem movimentos</td></tr>'
+      }
+
+      return movimentos
+        .map(
+          (movimento) => `
+            <tr>
+              <td>${escapeHtml(movimento?.historico || '-')}</td>
+              <td>${escapeHtml(movimento?.data_vencimento || '-')}</td>
+              <td>${escapeHtml(movimento?.data_pagamento || '-')}</td>
+              <td class="amount-col">${escapeHtml(formatCurrency(Number(movimento?.valor ?? 0)))}</td>
+            </tr>
+          `,
+        )
+        .join('')
+    }
+
+    const buildMovimentosListHtml = (movimentos) => {
+      if (!Array.isArray(movimentos) || !movimentos.length) {
+        return '<p class="empty-mini">Sem movimentos</p>'
+      }
+
+      return `
+        <div class="mov-list">
+          ${movimentos
+            .map(
+              (movimento) => `
+                <div class="mov-item">
+                  <p class="mov-historico">${escapeHtml(movimento?.historico || '-')}</p>
+                  <p class="mov-meta">Vencimento: ${escapeHtml(movimento?.data_vencimento || '-')}</p>
+                  <p class="mov-meta">Pagamento: ${escapeHtml(movimento?.data_pagamento || '-')}</p>
+                  <p class="amount-col">${escapeHtml(formatCurrency(Number(movimento?.valor ?? 0)))}</p>
+                </div>
+              `,
+            )
+            .join('')}
+        </div>
+      `
+    }
+
+    const buildExpandedDetailsHtml = ({ row, inlineMode, includeTitle }) => {
+      const analiseIa = String(row.contrato?.analise_ia ?? '').trim()
+      const observacao = String(row.contrato?.observacao ?? '').trim()
+      const contractLabel = row.contrato?.codigo_contrato || row.contrato?.codigo_cliente || '-'
+
+      const comparacaoContent = inlineMode
+        ? buildMovimentosListHtml(row.movimentosComparacao)
+        : `
+            <table class="mini-table">
+              <thead>
+                <tr>
+                  <th>Historico</th>
+                  <th>Vencimento</th>
+                  <th>Pagamento</th>
+                  <th>Valor</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${buildMovimentosRowsHtml(row.movimentosComparacao)}
+              </tbody>
+            </table>
+          `
+
+      const focoContent = inlineMode
+        ? buildMovimentosListHtml(row.movimentosFoco)
+        : `
+            <table class="mini-table">
+              <thead>
+                <tr>
+                  <th>Historico</th>
+                  <th>Vencimento</th>
+                  <th>Pagamento</th>
+                  <th>Valor</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${buildMovimentosRowsHtml(row.movimentosFoco)}
+              </tbody>
+            </table>
+          `
+
+      return `
+        <article class="expanded-print-detail ${inlineMode ? 'expanded-inline' : ''}">
+          ${includeTitle ? `<p class="expanded-title">Detalhes expandidos - Contrato ${escapeHtml(contractLabel)}</p>` : ''}
+          <div class="expanded-grid">
+            <section class="mov-card">
+              <h4>Movimentos - ${escapeHtml(periodoComparacao)}</h4>
+              ${comparacaoContent}
+              <p class="mov-subtotal">Subtotal: ${escapeHtml(formatCurrency(row.subtotalComparacao))}</p>
+            </section>
+            <section class="mov-card">
+              <h4>Movimentos - ${escapeHtml(periodoFoco)}</h4>
+              ${focoContent}
+              <p class="mov-subtotal">Subtotal: ${escapeHtml(formatCurrency(row.subtotalFoco))}</p>
+            </section>
+          </div>
+          <div class="notes-grid">
+            ${analiseIa
+              ? `
+                  <section class="note-card note-ia">
+                    <h4>Comentario da IA</h4>
+                    <div class="note-text">${formatPrintText(analiseIa)}</div>
+                  </section>
+                `
+              : ''}
+            <section class="note-card note-obs">
+              <h4>Observacao</h4>
+              <div class="note-text">${observacao ? formatPrintText(observacao) : '<span class="empty">Sem observacao</span>'}</div>
+            </section>
+          </div>
+        </article>
+      `
+    }
+
+    const tableRowsHtml = rows
+      .map((row) => {
+        const contrato = row.contrato
+        const differenceClass = row.difference > 0 ? 'diff-positive' : row.difference < 0 ? 'diff-negative' : 'diff-neutral'
+
+        return `
+          <tr>
+            <td>${escapeHtml(contrato.codigo_contrato || '-')}</td>
+            <td>${escapeHtml(contrato.locatario || '-')}</td>
+            <td>${escapeHtml(contrato.locador || '-')}</td>
+            <td>${escapeHtml(formatCurrency(row.subtotalFoco))}</td>
+            <td>${escapeHtml(formatCurrency(row.subtotalComparacao))}</td>
+            <td class="${differenceClass}">${escapeHtml(formatCurrency(row.difference))}</td>
+            <td>${escapeHtml(getStatusLabel(contrato.status))}</td>
+          </tr>
+        `
+      })
+      .join('')
+
+    const expandedDetailsHtml = rows
+      .filter((row) => expandedRows.has(row.key))
+      .map((row) => buildExpandedDetailsHtml({ row, inlineMode: false, includeTitle: true }))
+      .join('')
+
+    const rowsInlineHtml = rows
+      .map((row) => {
+        const contrato = row.contrato
+        const differenceClass = row.difference > 0 ? 'diff-positive' : row.difference < 0 ? 'diff-negative' : 'diff-neutral'
+        const expandedInline = expandedRows.has(row.key)
+
+        return `
+          <article class="row-card">
+            <div class="row-summary-grid">
+              <div class="summary-item"><span class="meta">Codigo Contrato</span><strong>${escapeHtml(contrato.codigo_contrato || '-')}</strong></div>
+              <div class="summary-item"><span class="meta">Locatario</span><strong>${escapeHtml(contrato.locatario || '-')}</strong></div>
+              <div class="summary-item"><span class="meta">Locador</span><strong>${escapeHtml(contrato.locador || '-')}</strong></div>
+              <div class="summary-item"><span class="meta">${escapeHtml(periodoFoco)}</span><strong>${escapeHtml(formatCurrency(row.subtotalFoco))}</strong></div>
+              <div class="summary-item"><span class="meta">${escapeHtml(periodoComparacao)}</span><strong>${escapeHtml(formatCurrency(row.subtotalComparacao))}</strong></div>
+              <div class="summary-item"><span class="meta">Diferenca</span><strong class="${differenceClass}">${escapeHtml(formatCurrency(row.difference))}</strong></div>
+              <div class="summary-item"><span class="meta">Status</span><strong>${escapeHtml(getStatusLabel(contrato.status))}</strong></div>
+            </div>
+            ${expandedInline
+              ? buildExpandedDetailsHtml({ row, inlineMode: true, includeTitle: false })
+              : ''}
+          </article>
+        `
+      })
+      .join('')
+
+    const iaCardsHtml = rows
+      .map((row) => {
+        const contrato = row.contrato
+        const analiseIa = String(contrato.analise_ia ?? '').trim()
+
+        return `
+          <article class="ia-card">
+            <div class="ia-grid">
+              <div><span class="meta">Codigo Contrato</span><strong>${escapeHtml(contrato.codigo_contrato || '-')}</strong></div>
+              <div><span class="meta">Locatario</span><strong>${escapeHtml(contrato.locatario || '-')}</strong></div>
+              <div><span class="meta">Locador</span><strong>${escapeHtml(contrato.locador || '-')}</strong></div>
+              <div><span class="meta">${escapeHtml(periodoFoco)}</span><strong>${escapeHtml(formatCurrency(row.subtotalFoco))}</strong></div>
+              <div><span class="meta">${escapeHtml(periodoComparacao)}</span><strong>${escapeHtml(formatCurrency(row.subtotalComparacao))}</strong></div>
+              <div><span class="meta">Diferenca</span><strong>${escapeHtml(formatCurrency(row.difference))}</strong></div>
+              <div><span class="meta">Status</span><strong>${escapeHtml(getStatusLabel(contrato.status))}</strong></div>
+            </div>
+            <div class="ia-comment">
+              <p class="meta">Comentario da IA</p>
+              <div class="comment-text">${analiseIa ? formatPrintText(analiseIa) : '<span class="empty">Sem analise da IA</span>'}</div>
+            </div>
+          </article>
+        `
+      })
+      .join('')
+
+    const contentHtml =
+      viewMode !== 'tabela'
+        ? `
+          <section class="ia-wrap">
+            ${iaCardsHtml || '<p class="empty-row">Nenhum contrato encontrado para os filtros aplicados.</p>'}
+          </section>
+        `
+        : useInlineExpandedLayout
+          ? `
+            <section class="rows-inline-wrap">
+              ${rowsInlineHtml || '<p class="empty-row">Nenhum contrato encontrado para os filtros aplicados.</p>'}
+            </section>
+          `
+          : `
+            <section class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Codigo Contrato</th>
+                    <th>Locatario</th>
+                    <th>Locador</th>
+                    <th>${escapeHtml(periodoFoco)}</th>
+                    <th>${escapeHtml(periodoComparacao)}</th>
+                    <th>Diferenca</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${tableRowsHtml || '<tr><td colspan="7" class="empty-row">Nenhum contrato encontrado para os filtros aplicados.</td></tr>'}
+                </tbody>
+              </table>
+              ${expandedDetailsHtml
+                ? `
+                  <section class="expanded-section">
+                    <h3>Detalhes dos contratos expandidos</h3>
+                    ${expandedDetailsHtml}
+                  </section>
+                `
+                : ''}
+            </section>
+          `
+
+    const html = `
+      <!doctype html>
+      <html lang="pt-BR">
+        <head>
+          <meta charset="UTF-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+          <title>Impressao - ${escapeHtml(analise.nome)}</title>
+          <style>
+            :root {
+              --ink: #0f172a;
+              --muted: #475569;
+              --line: #cbd5e1;
+              --sheet: #f8fafc;
+              --accent: #0e7490;
+              --good: #047857;
+              --bad: #be123c;
+            }
+
+            * { box-sizing: border-box; }
+
+            body {
+              margin: 0;
+              font-family: 'Segoe UI', Tahoma, sans-serif;
+              color: var(--ink);
+              background: linear-gradient(160deg, #f8fafc 0%, #eef2ff 100%);
+            }
+
+            .sheet {
+              max-width: 1160px;
+              margin: 24px auto;
+              background: #fff;
+              border: 1px solid var(--line);
+              border-radius: 16px;
+              padding: 24px;
+              box-shadow: 0 12px 40px rgba(15, 23, 42, 0.08);
+            }
+
+            .head {
+              border-bottom: 1px solid var(--line);
+              padding-bottom: 14px;
+              margin-bottom: 16px;
+            }
+
+            .title {
+              margin: 0;
+              font-size: 24px;
+              line-height: 1.2;
+            }
+
+            .subtitle {
+              margin: 6px 0 0;
+              font-size: 13px;
+              color: var(--muted);
+            }
+
+            .chips {
+              margin-top: 12px;
+              display: flex;
+              flex-wrap: wrap;
+              gap: 8px;
+            }
+
+            .chip {
+              border: 1px solid #bae6fd;
+              background: #ecfeff;
+              color: var(--accent);
+              font-size: 11px;
+              font-weight: 700;
+              letter-spacing: .02em;
+              text-transform: uppercase;
+              border-radius: 999px;
+              padding: 4px 10px;
+            }
+
+            table {
+              width: 100%;
+              border-collapse: collapse;
+            }
+
+            th, td {
+              border: 1px solid #e2e8f0;
+              text-align: left;
+              padding: 8px;
+              font-size: 12px;
+              vertical-align: top;
+            }
+
+            th {
+              background: #f1f5f9;
+              font-size: 11px;
+              text-transform: uppercase;
+              letter-spacing: .03em;
+              color: #334155;
+            }
+
+            .rows-inline-wrap {
+              display: grid;
+              gap: 12px;
+            }
+
+            .row-card {
+              border: 1px solid #cbd5e1;
+              border-radius: 12px;
+              background: #fff;
+              padding: 12px;
+            }
+
+            .row-summary-grid {
+              display: grid;
+              grid-template-columns: repeat(3, minmax(0, 1fr));
+              gap: 10px;
+            }
+
+            .summary-item {
+              border: 1px solid #e2e8f0;
+              border-radius: 8px;
+              padding: 8px;
+              background: #f8fafc;
+            }
+
+            .diff-positive { color: var(--good); font-weight: 700; }
+            .diff-negative { color: var(--bad); font-weight: 700; }
+            .diff-neutral { color: #64748b; font-weight: 700; }
+
+            .expanded-section {
+              margin-top: 14px;
+              display: grid;
+              gap: 12px;
+            }
+
+            .expanded-section h3 {
+              margin: 0;
+              font-size: 12px;
+              text-transform: uppercase;
+              letter-spacing: .04em;
+              color: #334155;
+            }
+
+            .expanded-print-detail {
+              border: 1px solid #cbd5e1;
+              border-radius: 12px;
+              background: #f8fafc;
+              padding: 12px;
+            }
+
+            .expanded-inline {
+              margin-top: 10px;
+            }
+
+            .expanded-title {
+              margin: 0 0 8px;
+              font-size: 11px;
+              text-transform: uppercase;
+              letter-spacing: .04em;
+              color: #0f172a;
+              font-weight: 700;
+            }
+
+            .expanded-grid {
+              display: grid;
+              grid-template-columns: repeat(2, minmax(0, 1fr));
+              gap: 12px;
+            }
+
+            .mov-card {
+              border: 1px solid #dbeafe;
+              background: #fff;
+              border-radius: 10px;
+              padding: 10px;
+            }
+
+            .mov-card h4 {
+              margin: 0 0 8px;
+              font-size: 11px;
+              text-transform: uppercase;
+              letter-spacing: .03em;
+              color: #0f172a;
+            }
+
+            .mini-table th,
+            .mini-table td {
+              font-size: 11px;
+              padding: 6px;
+            }
+
+            .mov-list {
+              display: grid;
+              gap: 8px;
+            }
+
+            .mov-item {
+              border: 1px solid #e2e8f0;
+              border-radius: 8px;
+              background: #f8fafc;
+              padding: 8px;
+            }
+
+            .mov-historico {
+              margin: 0 0 4px;
+              font-size: 11px;
+              font-weight: 700;
+              color: #0f172a;
+            }
+
+            .mov-meta {
+              margin: 0;
+              font-size: 11px;
+              color: #475569;
+            }
+
+            .amount-col {
+              text-align: right;
+              white-space: nowrap;
+              font-weight: 700;
+              font-size: 11px;
+              color: #0f172a;
+              margin: 4px 0 0;
+            }
+
+            .empty-mini {
+              text-align: center;
+              color: #64748b;
+              font-style: italic;
+            }
+
+            .mov-subtotal {
+              margin: 8px 0 0;
+              font-size: 11px;
+              font-weight: 700;
+              color: #0f172a;
+              text-align: right;
+            }
+
+            .notes-grid {
+              margin-top: 10px;
+              display: grid;
+              gap: 10px;
+            }
+
+            .note-card {
+              border: 1px solid #e2e8f0;
+              border-radius: 10px;
+              background: #fff;
+              padding: 10px;
+            }
+
+            .note-card h4 {
+              margin: 0 0 6px;
+              font-size: 11px;
+              text-transform: uppercase;
+              letter-spacing: .03em;
+              color: #0f172a;
+            }
+
+            .note-ia {
+              border-color: #bae6fd;
+              background: #f0f9ff;
+            }
+
+            .note-obs {
+              border-color: #dbeafe;
+              background: #f8fafc;
+            }
+
+            .note-text {
+              font-size: 11px;
+              line-height: 1.45;
+              color: #334155;
+            }
+
+            .ia-wrap {
+              display: grid;
+              gap: 12px;
+            }
+
+            .ia-card {
+              border: 1px solid #dbeafe;
+              border-radius: 12px;
+              background: #fff;
+              padding: 12px;
+            }
+
+            .ia-grid {
+              display: grid;
+              grid-template-columns: repeat(3, minmax(0, 1fr));
+              gap: 10px;
+              margin-bottom: 10px;
+            }
+
+            .meta {
+              display: block;
+              font-size: 10px;
+              text-transform: uppercase;
+              letter-spacing: .04em;
+              color: #64748b;
+              margin-bottom: 4px;
+              font-weight: 700;
+            }
+
+            strong {
+              font-size: 12px;
+              color: #0f172a;
+              font-weight: 700;
+            }
+
+            .ia-comment {
+              border: 1px solid #e2e8f0;
+              background: #f8fafc;
+              border-radius: 8px;
+              padding: 10px;
+            }
+
+            .comment-text {
+              font-size: 12px;
+              color: #334155;
+              line-height: 1.45;
+            }
+
+            .empty {
+              color: #64748b;
+              font-style: italic;
+            }
+
+            .empty-row {
+              text-align: center;
+              color: #64748b;
+              font-style: italic;
+              padding: 16px;
+            }
+
+            @media print {
+              body { background: #fff; }
+              .sheet {
+                box-shadow: none;
+                border: 0;
+                margin: 0;
+                max-width: 100%;
+                border-radius: 0;
+                padding: 0;
+              }
+              * {
+                word-break: normal;
+                overflow-wrap: normal;
+              }
+              .ia-card,
+              .expanded-print-detail,
+              .mov-card,
+              .note-card,
+              .row-card,
+              tr { break-inside: auto; }
+              .expanded-grid,
+              .ia-grid,
+              .row-summary-grid {
+                grid-template-columns: 1fr;
+              }
+            }
+          </style>
+        </head>
+        <body>
+          <main class="sheet">
+            <header class="head">
+              <h1 class="title">${escapeHtml(analise.nome)}</h1>
+              <p class="subtitle">Impressao gerada em ${escapeHtml(generatedAt)} | Modo: ${escapeHtml(modeLabel)} | ${escapeHtml(rows.length)} contrato(s)</p>
+              <p class="subtitle">Comparacao de ${escapeHtml(periodoComparacao)} com ${escapeHtml(periodoFoco)}</p>
+              <div class="chips">
+                <span class="chip">${escapeHtml(filtersLabel)}</span>
+                ${isTableView ? `<span class="chip">Detalhes expandidos: ${expandedPlacement === 'inline' ? 'Junto aos dados' : 'No final'}</span>` : ''}
+              </div>
+            </header>
+            ${contentHtml}
+          </main>
+        </body>
+      </html>
+    `
+
+    const printFrame = document.createElement('iframe')
+    printFrame.setAttribute('aria-hidden', 'true')
+    printFrame.style.position = 'fixed'
+    printFrame.style.right = '0'
+    printFrame.style.bottom = '0'
+    printFrame.style.width = '0'
+    printFrame.style.height = '0'
+    printFrame.style.border = '0'
+    document.body.appendChild(printFrame)
+
+    const frameWindow = printFrame.contentWindow
+    if (!frameWindow) {
+      document.body.removeChild(printFrame)
+      setErrorMessage('Nao foi possivel iniciar a impressao neste navegador.')
+      return
+    }
+
+    frameWindow.document.open()
+    frameWindow.document.write(html)
+    frameWindow.document.close()
+
+    setTimeout(() => {
+      frameWindow.focus()
+      frameWindow.print()
+
+      setTimeout(() => {
+        if (printFrame.parentNode) {
+          printFrame.parentNode.removeChild(printFrame)
+        }
+      }, 600)
+    }, 220)
+  }
+
+  function submitPrintConfig() {
+    setPrintModalOpen(false)
+    executePrint({ expandedPlacement: printExpandedPlacement })
+  }
+
   if (loading) {
     return <p className="text-sm text-slate-600">Carregando analise...</p>
   }
@@ -862,6 +1588,14 @@ function RemessaBoletosAnalisePage() {
           >
             Importar planilha
           </Link>
+          <button
+            type="button"
+            onClick={openPrintConfigModal}
+            disabled={!activeRowsForPrint.length}
+            className="rounded-xl border border-violet-300 bg-violet-50 px-4 py-2 text-sm font-semibold text-violet-800 transition hover:border-violet-400 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-70"
+          >
+            Imprimir
+          </button>
           <button
             type="button"
             onClick={() => openAnalysisConfigModal({ scope: 'all' })}
@@ -1308,6 +2042,72 @@ function RemessaBoletosAnalisePage() {
           })}
         </div>
       )}
+
+      {printModalOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4">
+          <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-5 shadow-xl">
+            <h2 className="text-lg font-semibold text-slate-900">Configurar impressao</h2>
+            <p className="mt-1 text-sm text-slate-600">Defina o formato de exportacao antes de imprimir.</p>
+
+            <div className="mt-4 space-y-3">
+              {viewMode === 'tabela' ? (
+                <div className="space-y-2">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Detalhes expandidos</p>
+                  <label className="flex items-start gap-2 text-sm text-slate-700">
+                    <input
+                      type="radio"
+                      name="print-expanded-placement"
+                      value="final"
+                      checked={printExpandedPlacement === 'final'}
+                      onChange={() => setPrintExpandedPlacement('final')}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      No final da pagina
+                      <span className="mt-0.5 block text-xs text-slate-500">Mantem a tabela resumida e envia os expandidos para uma secao separada.</span>
+                    </span>
+                  </label>
+                  <label className="flex items-start gap-2 text-sm text-slate-700">
+                    <input
+                      type="radio"
+                      name="print-expanded-placement"
+                      value="inline"
+                      checked={printExpandedPlacement === 'inline'}
+                      onChange={() => setPrintExpandedPlacement('inline')}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      Junto com os dados do contrato
+                      <span className="mt-0.5 block text-xs text-slate-500">Nao usa formato de tabela na impressao para reduzir quebras ruins.</span>
+                    </span>
+                  </label>
+                </div>
+              ) : (
+                <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                  Na visualizacao de comentarios da IA, a impressao sempre e feita em cards.
+                </p>
+              )}
+            </div>
+
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={closePrintConfigModal}
+                className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:border-slate-400"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={submitPrintConfig}
+                className="rounded-lg bg-violet-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-600"
+              >
+                Imprimir agora
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {analysisModalOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4">
