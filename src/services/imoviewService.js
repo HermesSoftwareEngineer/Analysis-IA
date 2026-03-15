@@ -73,7 +73,66 @@ function toIsoDate(value) {
   return null
 }
 
-function getMonthDateRange(mes, ano) {
+function buildMovimentoFingerprint(movimento) {
+  const codigo = String(
+    movimento?.codigo ?? movimento?.dados_json?.codigodetalhe ?? movimento?.dados_json?.codigo ?? '',
+  ).trim()
+  const planoConta = String(
+    movimento?.dados_json?.codigoplanoconta ??
+      movimento?.dados_json?.codigoPlanoConta ??
+      movimento?.dados_json?.nomeplanoconta ??
+      '',
+  )
+    .trim()
+    .toLowerCase()
+  const historico = String(movimento?.historico ?? '').trim().toLowerCase()
+  const valor = Number(movimento?.valor ?? 0).toFixed(2)
+  const vencimento = String(movimento?.data_vencimento ?? '').trim()
+  const pagamento = String(movimento?.data_pagamento ?? '').trim()
+
+  return `${codigo}|${planoConta}|${historico}|${valor}|${vencimento}|${pagamento}`
+}
+
+function dedupeMovimentos(movimentos) {
+  if (!Array.isArray(movimentos) || !movimentos.length) {
+    return []
+  }
+
+  const seen = new Set()
+  const unique = []
+
+  for (const movimento of movimentos) {
+    const key = buildMovimentoFingerprint(movimento)
+    if (seen.has(key)) {
+      continue
+    }
+
+    seen.add(key)
+    unique.push(movimento)
+  }
+
+  return unique
+}
+
+function normalizeTipoCliente(value) {
+  return String(value ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase()
+}
+
+function isLocatarioTipoCliente(value) {
+  const tipo = normalizeTipoCliente(value)
+  if (!tipo) {
+    return false
+  }
+
+  return tipo.includes('locatario') || tipo.includes('inquilino')
+}
+
+// Janela estrita: somente o mês consultado.
+function getMovimentosDateRange(mes, ano) {
   const mm = String(mes).padStart(2, '0')
   const lastDay = new Date(ano, mes, 0).getDate()
   const ddLast = String(lastDay).padStart(2, '0')
@@ -84,31 +143,30 @@ function getMonthDateRange(mes, ano) {
   }
 }
 
-export async function fetchMovimentosImoview({ codigoCliente, codigoContrato, codigoImovel, ano, mes }) {
+export async function fetchMovimentosImoview({ codigoContrato, ano, mes }) {
   const apiKey = import.meta.env.VITE_IMOVIEW_API_KEY
 
   if (!apiKey) {
     throw new Error('Defina VITE_IMOVIEW_API_KEY no arquivo .env para consultar a API do Imoview.')
   }
 
-  const { dataInicial, dataFinal } = getMonthDateRange(mes, ano)
+  const contractCode = String(codigoContrato ?? '').trim()
+  if (!contractCode) {
+    throw new Error('Codigo de contrato ausente para consultar movimentos no Imoview.')
+  }
+
+  const { dataInicial, dataFinal } = getMovimentosDateRange(mes, ano)
   const headers = { chave: apiKey }
   const PAGE_SIZE = 1000
 
-  const baseParams = {
+  const params = {
     numeroRegistros: String(PAGE_SIZE),
-    codigoCliente: String(codigoCliente),
+    codigoContratoAluguel: contractCode,
     dataVencimentoInicial: dataInicial,
     dataVencimentoFinal: dataFinal,
   }
 
-  if (codigoContrato) {
-    baseParams.codigoContratoAluguel = String(codigoContrato)
-  }
-
-  if (codigoImovel) {
-    baseParams.codigoImovel = String(codigoImovel)
-  }
+  console.debug('[Imoview] fetchMovimentosImoview →', { codigoContrato: contractCode, mes, ano, dataInicial, dataFinal })
 
   const allItems = []
   let page = 1
@@ -117,16 +175,29 @@ export async function fetchMovimentosImoview({ codigoCliente, codigoContrato, co
   while (hasMore) {
     const response = await requestImoview(
       '/Movimento/RetornarMovimentos',
-      { ...baseParams, numeroPagina: String(page) },
+      { ...params, numeroPagina: String(page) },
       headers,
     )
     const lista = Array.isArray(response?.lista) ? response.lista : []
+
+    if (page === 1) console.debug('[Imoview] página 1 resposta →', { quantidade: response?.quantidade, listaLength: lista.length, primeiroItem: lista[0] ?? null })
+
     allItems.push(...lista)
     hasMore = lista.length >= PAGE_SIZE
     page += 1
   }
 
-  return { quantidade: allItems.length, lista: allItems }
+  console.debug('[Imoview] total itens recebidos →', allItems.length)
+
+  return {
+    quantidade: allItems.length,
+    lista: allItems,
+    requestMeta: {
+      codigoContratoAluguel: contractCode,
+      dataInicial,
+      dataFinal,
+    },
+  }
 }
 
 export function normalizeMovimentosPayload(response, context = {}) {
@@ -138,7 +209,7 @@ export function normalizeMovimentosPayload(response, context = {}) {
   const codigoImovel = normalizeCode(first?.codigoimovel) || String(context.codigoImovel ?? '')
   const locatario = sanitizeText(first?.nomecliente ?? '')
 
-  // Intervalo esperado para filtro client-side (garante que só entram movimentos do mês pedido)
+  // Filtro estrito por mês: aceita apenas vencimentos entre 01/MM e o último dia de MM.
   const mesContext = context.mes ? Number(context.mes) : null
   const anoContext = context.ano ? Number(context.ano) : null
   const rangeStart = mesContext && anoContext
@@ -149,19 +220,28 @@ export function normalizeMovimentosPayload(response, context = {}) {
     : null
 
   function isWithinRange(isoDate) {
-    if (!rangeStart || !rangeEnd || !isoDate) {
+    if (!rangeStart || !rangeEnd) {
       return true
     }
-    const d = new Date(isoDate)
+    if (!isoDate) {
+      return false
+    }
+    const d = new Date(isoDate + 'T00:00:00')
     return d >= rangeStart && d <= rangeEnd
   }
 
-  const movimentos = lista.flatMap((item) => {
+  const movimentosRaw = lista.flatMap((item) => {
     const datavenc = toIsoDate(item.datavencimento)
     const datapagto = toIsoDate(item.datapagamento)
     const detalhes = Array.isArray(item.detalhes) ? item.detalhes : []
+    const tipoCliente = item?.tipocliente
 
-    // Descarta o movimento inteiro se o vencimento estiver fora do período pedido
+    // A API pode retornar movimentos de fornecedor no mesmo contrato;
+    // aqui garantimos que somente movimentos de locatario entram na analise.
+    if (!isLocatarioTipoCliente(tipoCliente)) {
+      return []
+    }
+
     if (!isWithinRange(datavenc)) {
       return []
     }
@@ -187,6 +267,8 @@ export function normalizeMovimentosPayload(response, context = {}) {
     }))
   })
 
+  const movimentos = dedupeMovimentos(movimentosRaw)
+
   const subtotal = movimentos.reduce((acc, m) => acc + m.valor, 0)
 
   return {
@@ -211,9 +293,12 @@ export async function pesquisarClientePorCpf(cpf) {
     )
   }
 
+  const cpfDigits = String(cpf ?? '').replace(/\D/g, '')
+  const searchText = cpfDigits || String(cpf ?? '').trim()
+
   const payload = await requestImoview(
     '/Cliente/App_PesquisarCliente',
-    { codigoUsuario, textoPesquisa: cpf },
+    { codigoUsuario, textoPesquisa: searchText },
     { chave: apiKey, codigoacesso: codigoAcesso },
   )
 

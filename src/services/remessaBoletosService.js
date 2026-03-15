@@ -1,5 +1,5 @@
 import { supabase } from '../lib/supabaseClient'
-import { fetchMovimentosImoview, normalizeMovimentosPayload, pesquisarClientePorCpf } from './imoviewService'
+import { fetchMovimentosImoview, normalizeMovimentosPayload } from './imoviewService'
 
 function normalizeNumber(value) {
   const parsed = Number(value)
@@ -20,28 +20,178 @@ function parseDateBrToIso(value) {
   return `${match[3]}-${match[2]}-${match[1]}`
 }
 
+function buildMovimentoFingerprint(movimento) {
+  const codigo = String(
+    movimento?.codigo ?? movimento?.dados_json?.codigodetalhe ?? movimento?.dados_json?.codigo ?? '',
+  ).trim()
+  const planoConta = String(
+    movimento?.dados_json?.codigoplanoconta ??
+      movimento?.dados_json?.codigoPlanoConta ??
+      movimento?.dados_json?.nomeplanoconta ??
+      '',
+  )
+    .trim()
+    .toLowerCase()
+  const historico = String(movimento?.historico ?? '').trim().toLowerCase()
+  const valor = normalizeNumber(movimento?.valor).toFixed(2)
+  const vencimento = parseDateBrToIso(movimento?.data_vencimento)
+  const pagamento = parseDateBrToIso(movimento?.data_pagamento)
+
+  return `${codigo}|${planoConta}|${historico}|${valor}|${vencimento}|${pagamento}`
+}
+
 function serializeMovimentos(movimentos) {
   if (!Array.isArray(movimentos) || !movimentos.length) {
     return []
   }
 
-  return movimentos.map((movimento, index) => ({
-    codigo: String(movimento.codigo ?? index + 1),
-    historico: String(movimento.historico ?? '').trim(),
-    valor: normalizeNumber(movimento.valor),
-    data_vencimento: parseDateBrToIso(movimento.data_vencimento),
-    data_pagamento: parseDateBrToIso(movimento.data_pagamento),
-    dados_json: movimento.dados_json ?? movimento,
-  }))
+  const seen = new Set()
+  const serialized = []
+
+  for (let index = 0; index < movimentos.length; index += 1) {
+    const movimento = movimentos[index]
+    const key = buildMovimentoFingerprint(movimento)
+
+    if (seen.has(key)) {
+      continue
+    }
+
+    seen.add(key)
+    serialized.push({
+      codigo: String(movimento.codigo ?? index + 1),
+      historico: String(movimento.historico ?? '').trim(),
+      valor: normalizeNumber(movimento.valor),
+      data_vencimento: parseDateBrToIso(movimento.data_vencimento),
+      data_pagamento: parseDateBrToIso(movimento.data_pagamento),
+      dados_json: movimento.dados_json ?? movimento,
+    })
+  }
+
+  return serialized
 }
 
-export async function listAnalisesBoletos(userId) {
+function resolveRemessaConcurrency() {
+  const parsedNormal = Number.parseInt(import.meta.env.VITE_REMESSA_CONCURRENCY ?? '', 10)
+  if (Number.isFinite(parsedNormal) && parsedNormal > 0) {
+    return Math.min(parsedNormal, 12)
+  }
+
+  const parsedQuick = Number.parseInt(import.meta.env.VITE_REMESSA_RAPIDA_CONCURRENCY ?? '', 10)
+  if (Number.isFinite(parsedQuick) && parsedQuick > 0) {
+    return Math.min(parsedQuick, 12)
+  }
+
+  return 4
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+function getErrorStatus(error) {
+  const status = Number(error?.status)
+  return Number.isFinite(status) ? status : 0
+}
+
+function isTransientError(error) {
+  const status = getErrorStatus(error)
+  if (status >= 500) {
+    return true
+  }
+
+  const message = String(error?.message ?? '').toLowerCase()
+  if (
+    message.includes('statement timeout') ||
+    message.includes('canceling statement due to statement timeout') ||
+    message.includes('fetch failed') ||
+    message.includes('networkerror') ||
+    message.includes('failed to fetch') ||
+    message.includes('cors')
+  ) {
+    return true
+  }
+
+  return false
+}
+
+async function withRetry(operation, {
+  retries = 2,
+  baseDelayMs = 350,
+  maxDelayMs = 1800,
+  shouldRetry = isTransientError,
+} = {}) {
+  let attempt = 0
+  let lastError = null
+
+  while (attempt <= retries) {
+    try {
+      return await operation()
+    } catch (error) {
+      lastError = error
+
+      if (attempt >= retries || !shouldRetry(error)) {
+        throw error
+      }
+
+      const delayMs = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt)
+      await sleep(delayMs)
+      attempt += 1
+    }
+  }
+
+  throw lastError
+}
+
+function chunkArray(items, chunkSize) {
+  if (!Array.isArray(items) || !items.length) {
+    return []
+  }
+
+  const chunks = []
+  const size = Math.max(1, chunkSize)
+
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size))
+  }
+
+  return chunks
+}
+
+async function runWithConcurrency(items, concurrency, worker) {
+  if (!Array.isArray(items) || !items.length) {
+    return []
+  }
+
+  const results = new Array(items.length)
+  let nextIndex = 0
+
+  async function runWorker() {
+    while (true) {
+      const currentIndex = nextIndex
+      nextIndex += 1
+
+      if (currentIndex >= items.length) {
+        return
+      }
+
+      results[currentIndex] = await worker(items[currentIndex], currentIndex)
+    }
+  }
+
+  const workerCount = Math.max(1, Math.min(concurrency, items.length))
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()))
+
+  return results
+}
+
+export async function listAnalisesBoletos() {
   const { data, error } = await supabase
     .from('analises_boletos')
     .select(
       'id, nome, mes_foco, ano_foco, mes_comparacao, ano_comparacao, created_at, contratos_analise(count)',
     )
-    .eq('user_id', userId)
     .order('created_at', { ascending: false })
 
   if (error) {
@@ -82,12 +232,11 @@ export async function createAnaliseBoleto({
   return data
 }
 
-export async function updateAnaliseBoleto({ analiseId, userId, nome, mesFoco, anoFoco, mesComparacao, anoComparacao }) {
+export async function updateAnaliseBoleto({ analiseId, nome, mesFoco, anoFoco, mesComparacao, anoComparacao }) {
   const { data, error } = await supabase
     .from('analises_boletos')
     .update({ nome, mes_foco: mesFoco, ano_foco: anoFoco, mes_comparacao: mesComparacao, ano_comparacao: anoComparacao })
     .eq('id', analiseId)
-    .eq('user_id', userId)
     .select('*')
     .single()
 
@@ -98,12 +247,11 @@ export async function updateAnaliseBoleto({ analiseId, userId, nome, mesFoco, an
   return data
 }
 
-export async function deleteAnaliseBoleto({ analiseId, userId }) {
+export async function deleteAnaliseBoleto({ analiseId }) {
   const { error } = await supabase
     .from('analises_boletos')
     .delete()
     .eq('id', analiseId)
-    .eq('user_id', userId)
 
   if (error) {
     throw error
@@ -114,6 +262,17 @@ export async function updateContratoStatusObservacao({ contratoId, status, obser
   const { error } = await supabase
     .from('contratos_analise')
     .update({ status, observacao })
+    .eq('id', contratoId)
+
+  if (error) {
+    throw error
+  }
+}
+
+export async function updateContratoAnaliseIA({ contratoId, analiseIa }) {
+  const { error } = await supabase
+    .from('contratos_analise')
+    .update({ analise_ia: String(analiseIa ?? '') })
     .eq('id', contratoId)
 
   if (error) {
@@ -152,13 +311,20 @@ export async function resetContratosSituacao(analiseId) {
   }
 }
 
-export async function getAnaliseBoletoById({ analiseId, userId }) {
-  const { data, error } = await supabase
-    .from('analises_boletos')
-    .select('*')
-    .eq('id', analiseId)
-    .eq('user_id', userId)
-    .single()
+export async function getAnaliseBoletoById({ analiseId }) {
+  const { data, error } = await withRetry(async () => {
+    const response = await supabase
+      .from('analises_boletos')
+      .select('*')
+      .eq('id', analiseId)
+      .single()
+
+    if (response.error) {
+      throw response.error
+    }
+
+    return response
+  })
 
   if (error) {
     throw error
@@ -355,22 +521,6 @@ export async function coletarExtratosParaContrato({
     { mes: analise.mes_comparacao, ano: analise.ano_comparacao },
   ]
 
-  // Resolve o codigo_cliente real via CPF antes de buscar extratos.
-  // Na planilha, a coluna "Codigo" é o codigo do contrato, nao do cliente.
-  let resolvedCodigoCliente = contrato.codigo_cliente
-  const cpf = contrato.cpf_locatario?.trim()
-
-  if (cpf) {
-    try {
-      const clienteInfo = await pesquisarClientePorCpf(cpf)
-      if (clienteInfo?.codigoCliente) {
-        resolvedCodigoCliente = clienteInfo.codigoCliente
-      }
-    } catch {
-      // Se falhar, tenta usar o codigo_cliente original como fallback.
-    }
-  }
-
   const errors = []
 
   for (let iterationIndex = 0; iterationIndex < periodos.length; iterationIndex += 1) {
@@ -378,9 +528,7 @@ export async function coletarExtratosParaContrato({
 
     try {
       const response = await fetchMovimentosImoview({
-        codigoCliente: resolvedCodigoCliente,
         codigoContrato: contrato.codigo_contrato,
-        codigoImovel: contrato.codigo_imovel,
         ano: periodo.ano,
         mes: periodo.mes,
       })
@@ -441,10 +589,9 @@ export async function coletarExtratosParaAnalise({ analise, contratos, onProgres
   const errors = []
   const totalIterations = contratos.length * 2
   let processedIterations = 0
+  const concurrency = resolveRemessaConcurrency()
 
-  for (let index = 0; index < contratos.length; index += 1) {
-    const contrato = contratos[index]
-
+  const resultsByContrato = await runWithConcurrency(contratos, concurrency, async (contrato) => {
     const result = await coletarExtratosParaContrato({
       analise,
       contrato,
@@ -463,14 +610,25 @@ export async function coletarExtratosParaAnalise({ analise, contratos, onProgres
       },
     })
 
-    if (result.failedIterations > 0) {
-      errors.push({
-        codigoContrato: contrato.codigo_contrato,
-        codigoCliente: contrato.codigo_cliente,
-        message: `Falha em ${result.failedIterations} periodo(s) do contrato.`,
-        details: result.errors,
-      })
+    return {
+      contrato,
+      result,
     }
+  })
+
+  for (let index = 0; index < resultsByContrato.length; index += 1) {
+    const { contrato, result } = resultsByContrato[index]
+
+    if (result.failedIterations <= 0) {
+      continue
+    }
+
+    errors.push({
+      codigoContrato: contrato.codigo_contrato,
+      codigoCliente: contrato.codigo_cliente,
+      message: `Falha em ${result.failedIterations} periodo(s) do contrato.`,
+      details: result.errors,
+    })
   }
 
   return {
@@ -481,28 +639,79 @@ export async function coletarExtratosParaAnalise({ analise, contratos, onProgres
 }
 
 export async function loadComparativoAnalise(analiseId) {
-  const { data: contratos, error: contratosError } = await supabase
-    .from('contratos_analise')
-    .select('*')
-    .eq('analise_id', analiseId)
+  const { data: contratos } = await withRetry(async () => {
+    const response = await supabase
+      .from('contratos_analise')
+      .select('*')
+      .eq('analise_id', analiseId)
 
-  if (contratosError) {
-    throw contratosError
+    if (response.error) {
+      throw response.error
+    }
+
+    return response
+  })
+
+  const { data: extratosBase } = await withRetry(async () => {
+    const response = await supabase
+      .from('extratos_boletos')
+      .select('id, analise_id, codigo_cliente, codigo_contrato, mes, ano, subtotal, dados_json, created_at')
+      .eq('analise_id', analiseId)
+
+    if (response.error) {
+      throw response.error
+    }
+
+    return response
+  })
+
+  const extratos = extratosBase ?? []
+  if (!extratos.length) {
+    return {
+      contratos: contratos ?? [],
+      extratos: [],
+    }
   }
 
-  const { data: extratos, error: extratosError } = await supabase
-    .from('extratos_boletos')
-    .select(
-      'id, analise_id, codigo_cliente, codigo_contrato, mes, ano, subtotal, dados_json, created_at, movimentos_boletos(*)',
-    )
-    .eq('analise_id', analiseId)
+  const extratoIds = extratos.map((row) => row.id)
+  const movimentosChunks = chunkArray(extratoIds, 200)
+  const movimentosByExtratoId = new Map()
 
-  if (extratosError) {
-    throw extratosError
+  for (let index = 0; index < movimentosChunks.length; index += 1) {
+    const idsChunk = movimentosChunks[index]
+
+    const { data: movimentosChunk } = await withRetry(async () => {
+      const response = await supabase
+        .from('movimentos_boletos')
+        .select('id, extrato_id, codigo, historico, valor, data_vencimento, data_pagamento, dados_json, created_at')
+        .in('extrato_id', idsChunk)
+
+      if (response.error) {
+        throw response.error
+      }
+
+      return response
+    })
+
+    for (let movimentoIndex = 0; movimentoIndex < (movimentosChunk ?? []).length; movimentoIndex += 1) {
+      const movimento = movimentosChunk[movimentoIndex]
+      const extratoId = movimento.extrato_id
+
+      if (!movimentosByExtratoId.has(extratoId)) {
+        movimentosByExtratoId.set(extratoId, [])
+      }
+
+      movimentosByExtratoId.get(extratoId).push(movimento)
+    }
   }
+
+  const extratosWithMovimentos = extratos.map((extrato) => ({
+    ...extrato,
+    movimentos_boletos: movimentosByExtratoId.get(extrato.id) ?? [],
+  }))
 
   return {
     contratos: contratos ?? [],
-    extratos: extratos ?? [],
+    extratos: extratosWithMovimentos,
   }
 }

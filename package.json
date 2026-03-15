@@ -10,10 +10,15 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@langchain/core": "^1.1.32",
+    "@langchain/google-genai": "^2.1.25",
     "@supabase/supabase-js": "^2.98.0",
+    "langsmith": "^0.5.10",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
     "react-router-dom": "^7.13.1",
+    "remark-gfm": "^4.0.1",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

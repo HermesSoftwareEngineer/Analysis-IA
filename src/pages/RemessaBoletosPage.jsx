@@ -3,11 +3,8 @@ import { Link } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import { getMonthLabel, MONTH_OPTIONS } from '../lib/monthOptions'
 import {
-  coletarExtratosParaAnalise,
   deleteAnaliseBoleto,
-  getAnaliseBoletoById,
   listAnalisesBoletos,
-  listContratosByAnalise,
   updateAnaliseBoleto,
 } from '../services/remessaBoletosService'
 
@@ -28,8 +25,6 @@ function RemessaBoletosPage() {
   const [analises, setAnalises] = useState([])
   const [loading, setLoading] = useState(true)
   const [errorMessage, setErrorMessage] = useState('')
-  const [statusMessage, setStatusMessage] = useState('')
-  const [refreshingId, setRefreshingId] = useState('')
   const [searchTerm, setSearchTerm] = useState('')
 
   // editar
@@ -56,7 +51,7 @@ function RemessaBoletosPage() {
     setErrorMessage('')
 
     try {
-      const data = await listAnalisesBoletos(user.id)
+    const data = await listAnalisesBoletos()
       setAnalises(data)
     } catch (error) {
       setErrorMessage(error.message || 'Nao foi possivel carregar as analises.')
@@ -120,38 +115,6 @@ function RemessaBoletosPage() {
     }
   }
 
-  async function handleRefresh(analiseId) {
-    setRefreshingId(analiseId)
-    setStatusMessage('')
-
-    try {
-      const analise = await getAnaliseBoletoById({ analiseId, userId: user.id })
-      const contratos = await listContratosByAnalise(analiseId)
-
-      if (!contratos.length) {
-        setStatusMessage('A analise selecionada ainda nao possui contratos importados.')
-        return
-      }
-
-      const result = await coletarExtratosParaAnalise({
-        analise,
-        contratos,
-      })
-
-      if (result.failed) {
-        setStatusMessage(`Atualizacao concluida com ${result.failed} contrato(s) com falha.`)
-      } else {
-        setStatusMessage('Atualizacao concluida com sucesso.')
-      }
-
-      await loadAnalises()
-    } catch (error) {
-      setErrorMessage(error.message || 'Nao foi possivel atualizar os valores da analise.')
-    } finally {
-      setRefreshingId('')
-    }
-  }
-
   const filteredAnalises = useMemo(() => {
     const query = searchTerm.trim().toLowerCase()
 
@@ -172,12 +135,20 @@ function RemessaBoletosPage() {
           </p>
         </div>
 
-        <Link
-          to="/remessa-boletos/nova"
-          className="rounded-xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-700"
-        >
-          Nova analise
-        </Link>
+        <div className="flex flex-wrap gap-2">
+          <Link
+            to="/remessa-boletos/rapida"
+            className="rounded-xl border border-cyan-300 bg-cyan-50 px-5 py-3 text-sm font-semibold text-cyan-800 transition hover:border-cyan-400 hover:bg-cyan-100"
+          >
+            Remessa rapida
+          </Link>
+          <Link
+            to="/remessa-boletos/nova"
+            className="rounded-xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-700"
+          >
+            Nova analise
+          </Link>
+        </div>
       </header>
 
       <div className="rounded-2xl border border-slate-200 bg-white p-4">
@@ -192,10 +163,6 @@ function RemessaBoletosPage() {
 
       {errorMessage ? (
         <p className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{errorMessage}</p>
-      ) : null}
-
-      {statusMessage ? (
-        <p className="rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm text-cyan-800">{statusMessage}</p>
       ) : null}
 
       <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">

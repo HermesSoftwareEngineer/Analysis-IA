@@ -11,6 +11,7 @@ import RemessaBoletosAnalisePage from './pages/RemessaBoletosAnalisePage'
 import RemessaBoletosImportPage from './pages/RemessaBoletosImportPage'
 import RemessaBoletosNovaPage from './pages/RemessaBoletosNovaPage'
 import RemessaBoletosPage from './pages/RemessaBoletosPage'
+import RemessaBoletosRapidaPage from './pages/RemessaBoletosRapidaPage'
 import RegisterPage from './pages/RegisterPage'
 
 function PublicOnlyRoute({ children }) {
@@ -92,6 +93,7 @@ function AppRoutes() {
             }
           />
           <Route path="/remessa-boletos" element={<RemessaBoletosPage />} />
+          <Route path="/remessa-boletos/rapida" element={<RemessaBoletosRapidaPage />} />
           <Route path="/remessa-boletos/nova" element={<RemessaBoletosNovaPage />} />
           <Route path="/remessa-boletos/:analiseId/importar" element={<RemessaBoletosImportPage />} />
           <Route path="/remessa-boletos/:analiseId" element={<RemessaBoletosAnalisePage />} />

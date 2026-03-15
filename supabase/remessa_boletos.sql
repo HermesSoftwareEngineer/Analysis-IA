@@ -23,6 +23,7 @@ create table if not exists public.contratos_analise (
   locador text,
   status text not null default 'a_conferir' check (status in ('a_conferir', 'conferido')),
   observacao text not null default '',
+  analise_ia text not null default '',
   sort_order integer not null default 0,
   situacao text not null default 'desatualizado' check (situacao in ('desatualizado', 'atualizado')),
   created_at timestamptz not null default now(),
@@ -33,6 +34,7 @@ create table if not exists public.contratos_analise (
 alter table public.contratos_analise
   add column if not exists status text not null default 'a_conferir' check (status in ('a_conferir', 'conferido')),
   add column if not exists observacao text not null default '',
+  add column if not exists analise_ia text not null default '',
   add column if not exists sort_order integer not null default 0,
   add column if not exists situacao text not null default 'desatualizado' check (situacao in ('desatualizado', 'atualizado'));
 
@@ -75,96 +77,38 @@ drop policy if exists "Analises owner select" on public.analises_boletos;
 drop policy if exists "Analises owner insert" on public.analises_boletos;
 drop policy if exists "Analises owner update" on public.analises_boletos;
 drop policy if exists "Analises owner delete" on public.analises_boletos;
+drop policy if exists "Analises shared all" on public.analises_boletos;
 
-create policy "Analises owner select"
+create policy "Analises shared all"
 on public.analises_boletos
-for select
+for all
 to authenticated
-using (user_id = auth.uid());
-
-create policy "Analises owner insert"
-on public.analises_boletos
-for insert
-to authenticated
-with check (user_id = auth.uid());
-
-create policy "Analises owner update"
-on public.analises_boletos
-for update
-to authenticated
-using (user_id = auth.uid())
-with check (user_id = auth.uid());
-
-create policy "Analises owner delete"
-on public.analises_boletos
-for delete
-to authenticated
-using (user_id = auth.uid());
+using (true)
+with check (true);
 
 drop policy if exists "Contratos owner all" on public.contratos_analise;
-create policy "Contratos owner all"
+drop policy if exists "Contratos shared all" on public.contratos_analise;
+create policy "Contratos shared all"
 on public.contratos_analise
 for all
 to authenticated
-using (
-  exists (
-    select 1
-    from public.analises_boletos ab
-    where ab.id = contratos_analise.analise_id
-      and ab.user_id = auth.uid()
-  )
-)
-with check (
-  exists (
-    select 1
-    from public.analises_boletos ab
-    where ab.id = contratos_analise.analise_id
-      and ab.user_id = auth.uid()
-  )
-);
+using (true)
+with check (true);
 
 drop policy if exists "Extratos owner all" on public.extratos_boletos;
-create policy "Extratos owner all"
+drop policy if exists "Extratos shared all" on public.extratos_boletos;
+create policy "Extratos shared all"
 on public.extratos_boletos
 for all
 to authenticated
-using (
-  exists (
-    select 1
-    from public.analises_boletos ab
-    where ab.id = extratos_boletos.analise_id
-      and ab.user_id = auth.uid()
-  )
-)
-with check (
-  exists (
-    select 1
-    from public.analises_boletos ab
-    where ab.id = extratos_boletos.analise_id
-      and ab.user_id = auth.uid()
-  )
-);
+using (true)
+with check (true);
 
 drop policy if exists "Movimentos owner all" on public.movimentos_boletos;
-create policy "Movimentos owner all"
+drop policy if exists "Movimentos shared all" on public.movimentos_boletos;
+create policy "Movimentos shared all"
 on public.movimentos_boletos
 for all
 to authenticated
-using (
-  exists (
-    select 1
-    from public.extratos_boletos eb
-    join public.analises_boletos ab on ab.id = eb.analise_id
-    where eb.id = movimentos_boletos.extrato_id
-      and ab.user_id = auth.uid()
-  )
-)
-with check (
-  exists (
-    select 1
-    from public.extratos_boletos eb
-    join public.analises_boletos ab on ab.id = eb.analise_id
-    where eb.id = movimentos_boletos.extrato_id
-      and ab.user_id = auth.uid()
-  )
-);
+using (true)
+with check (true);
