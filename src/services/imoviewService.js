@@ -131,19 +131,16 @@ function isLocatarioTipoCliente(value) {
   return tipo.includes('locatario') || tipo.includes('inquilino')
 }
 
-// Janela estrita: somente o mês consultado.
-function getMovimentosDateRange(mes, ano) {
-  const mm = String(mes).padStart(2, '0')
-  const lastDay = new Date(ano, mes, 0).getDate()
-  const ddLast = String(lastDay).padStart(2, '0')
-
-  return {
-    dataInicial: `01/${mm}/${ano}`,
-    dataFinal: `${ddLast}/${mm}/${ano}`,
+function isoToBrDate(isoDate) {
+  if (!isoDate) {
+    return ''
   }
+
+  const [year, month, day] = String(isoDate).slice(0, 10).split('-')
+  return `${day}/${month}/${year}`
 }
 
-export async function fetchMovimentosImoview({ codigoContrato, ano, mes }) {
+export async function fetchMovimentosImoview({ codigoContrato, dataInicial, dataFinal }) {
   const apiKey = import.meta.env.VITE_IMOVIEW_API_KEY
 
   if (!apiKey) {
@@ -155,18 +152,19 @@ export async function fetchMovimentosImoview({ codigoContrato, ano, mes }) {
     throw new Error('Codigo de contrato ausente para consultar movimentos no Imoview.')
   }
 
-  const { dataInicial, dataFinal } = getMovimentosDateRange(mes, ano)
+  const dataInicialBr = isoToBrDate(dataInicial)
+  const dataFinalBr = isoToBrDate(dataFinal)
   const headers = { chave: apiKey }
   const PAGE_SIZE = 1000
 
   const params = {
     numeroRegistros: String(PAGE_SIZE),
     codigoContratoAluguel: contractCode,
-    dataVencimentoInicial: dataInicial,
-    dataVencimentoFinal: dataFinal,
+    dataVencimentoInicial: dataInicialBr,
+    dataVencimentoFinal: dataFinalBr,
   }
 
-  console.debug('[Imoview] fetchMovimentosImoview →', { codigoContrato: contractCode, mes, ano, dataInicial, dataFinal })
+  console.debug('[Imoview] fetchMovimentosImoview →', { codigoContrato: contractCode, dataInicial, dataFinal })
 
   const allItems = []
   let page = 1
@@ -194,8 +192,8 @@ export async function fetchMovimentosImoview({ codigoContrato, ano, mes }) {
     lista: allItems,
     requestMeta: {
       codigoContratoAluguel: contractCode,
-      dataInicial,
-      dataFinal,
+      dataInicial: dataInicialBr,
+      dataFinal: dataFinalBr,
     },
   }
 }
@@ -209,15 +207,9 @@ export function normalizeMovimentosPayload(response, context = {}) {
   const codigoImovel = normalizeCode(first?.codigoimovel) || String(context.codigoImovel ?? '')
   const locatario = sanitizeText(first?.nomecliente ?? '')
 
-  // Filtro estrito por mês: aceita apenas vencimentos entre 01/MM e o último dia de MM.
-  const mesContext = context.mes ? Number(context.mes) : null
-  const anoContext = context.ano ? Number(context.ano) : null
-  const rangeStart = mesContext && anoContext
-    ? new Date(anoContext, mesContext - 1, 1)
-    : null
-  const rangeEnd = mesContext && anoContext
-    ? new Date(anoContext, mesContext, 0, 23, 59, 59)
-    : null
+  // Filtro estrito pelo intervalo de datas do periodo consultado.
+  const rangeStart = context.dataInicio ? new Date(context.dataInicio + 'T00:00:00') : null
+  const rangeEnd = context.dataFim ? new Date(context.dataFim + 'T23:59:59') : null
 
   function isWithinRange(isoDate) {
     if (!rangeStart || !rangeEnd) {

@@ -5,12 +5,11 @@ import { Link, useLocation, useParams } from 'react-router-dom'
 import ExtratoMovimentosTable from '../components/ExtratoMovimentosTable'
 import { useAuth } from '../hooks/useAuth'
 import { formatCurrency } from '../lib/currency'
-import { getMonthLabel } from '../lib/monthOptions'
 import { supabase } from '../lib/supabaseClient'
 import {
   coletarExtratosParaAnalise,
   coletarExtratosParaContrato,
-  getAnaliseBoletoById,
+  getAnaliseBoletoByNumero,
   loadComparativoAnalise,
   updateContratoAnaliseIA,
   resetContratosSituacao,
@@ -19,8 +18,13 @@ import {
 } from '../services/remessaBoletosService'
 import { analisarVariacaoContratoComIA, hasDifference } from '../services/aiVariacaoService'
 
-function getPeriodoLabel(mes, ano) {
-  return `${getMonthLabel(mes)} / ${ano}`
+function getPeriodoLabel(dataInicio, dataFim) {
+  const fmt = (iso) => {
+    if (!iso) return '-'
+    const [year, month, day] = iso.slice(0, 10).split('-')
+    return `${day}/${month}/${year}`
+  }
+  return `${fmt(dataInicio)} – ${fmt(dataFim)}`
 }
 
 function getDifferenceClass(difference) {
@@ -84,9 +88,9 @@ function sumMovimentos(movimentos) {
   return movimentos.reduce((total, movimento) => total + Number(movimento?.valor ?? 0), 0)
 }
 
-function findExtratoForPeriodo({ extratos, contrato, mes, ano }) {
+function findExtratoForPeriodo({ extratos, contrato, periodoTipo }) {
   const periodRows = extratos.filter(
-    (extrato) => Number(extrato.mes) === Number(mes) && Number(extrato.ano) === Number(ano),
+    (extrato) => extrato.periodo_tipo === periodoTipo,
   )
 
   // Todas as linhas do mesmo cliente nesse periodo
@@ -189,7 +193,7 @@ function formatPrintText(text) {
 }
 
 function RemessaBoletosAnalisePage() {
-  const { analiseId } = useParams()
+  const { analiseNumero } = useParams()
   const { user } = useAuth()
   const location = useLocation()
 
@@ -237,8 +241,8 @@ function RemessaBoletosAnalisePage() {
       setErrorMessage('')
 
       try {
-        const analiseData = await getAnaliseBoletoById({ analiseId, userId: user.id })
-        const comparativo = await loadComparativoAnalise(analiseId)
+        const analiseData = await getAnaliseBoletoByNumero({ analiseNumero, userId: user.id })
+        const comparativo = await loadComparativoAnalise(analiseData.id)
 
         setAnalise(analiseData)
         setContratos(comparativo.contratos)
@@ -251,7 +255,7 @@ function RemessaBoletosAnalisePage() {
         }
       }
     },
-    [analiseId, user?.id],
+    [analiseNumero, user?.id],
   )
 
   useEffect(() => {
@@ -267,10 +271,10 @@ function RemessaBoletosAnalisePage() {
   }, [location.state])
 
   useEffect(() => {
-    if (user?.id && analiseId) {
+    if (user?.id && analiseNumero) {
       loadData()
     }
-  }, [analiseId, user?.id, loadData])
+  }, [analiseNumero, user?.id, loadData])
 
   const scheduleLiveRefresh = useCallback(() => {
     if (refreshTimeoutRef.current) {
@@ -284,19 +288,19 @@ function RemessaBoletosAnalisePage() {
   }, [loadData])
 
   useEffect(() => {
-    if (!analiseId || !user?.id) {
+    if (!analise?.id || !user?.id) {
       return undefined
     }
 
     const channel = supabase
-      .channel(`remessa_boletos_live_${analiseId}`)
+      .channel(`remessa_boletos_live_${analise.id}`)
       .on(
         'postgres_changes',
         {
           event: '*',
           schema: 'public',
           table: 'contratos_analise',
-          filter: `analise_id=eq.${analiseId}`,
+          filter: `analise_id=eq.${analise.id}`,
         },
         scheduleLiveRefresh,
       )
@@ -306,7 +310,7 @@ function RemessaBoletosAnalisePage() {
           event: '*',
           schema: 'public',
           table: 'extratos_boletos',
-          filter: `analise_id=eq.${analiseId}`,
+          filter: `analise_id=eq.${analise.id}`,
         },
         scheduleLiveRefresh,
       )
@@ -314,13 +318,12 @@ function RemessaBoletosAnalisePage() {
 
     return () => {
       if (refreshTimeoutRef.current) {
-        clearTimeout(refreshTimeoutRef.current)
         refreshTimeoutRef.current = null
       }
 
       supabase.removeChannel(channel)
     }
-  }, [analiseId, scheduleLiveRefresh, user?.id])
+  }, [analise?.id, scheduleLiveRefresh, user?.id])
 
   const rows = useMemo(() => {
     if (!analise) {
@@ -331,15 +334,13 @@ function RemessaBoletosAnalisePage() {
       const focoExtrato = findExtratoForPeriodo({
         extratos,
         contrato,
-        mes: analise.mes_foco,
-        ano: analise.ano_foco,
+        periodoTipo: 'foco',
       })
 
       const comparacaoExtrato = findExtratoForPeriodo({
         extratos,
         contrato,
-        mes: analise.mes_comparacao,
-        ano: analise.ano_comparacao,
+        periodoTipo: 'comparacao',
       })
 
       const movimentosFoco = dedupeMovimentos(focoExtrato?.movimentos_boletos ?? [])
@@ -600,10 +601,12 @@ function RemessaBoletosAnalisePage() {
         contratos,
         onProgress: ({ processed, total, contrato, periodo, success }) => {
           const contractLabel = contrato.codigo_contrato || contrato.codigo_cliente
-          const periodoLabel = `${periodo.mes}/${periodo.ano}`
+          const periodoLabel = periodo.tipo === 'foco'
+            ? getPeriodoLabel(analise.data_inicio_foco, analise.data_fim_foco)
+            : getPeriodoLabel(analise.data_inicio_comparacao, analise.data_fim_comparacao)
 
           // Marca como atualizado quando o último período do contrato é processado
-          if (periodo.mes === analise.mes_comparacao && periodo.ano === analise.ano_comparacao) {
+          if (periodo.tipo === 'comparacao') {
             setUpdatedIds((prev) => new Set([...prev, contrato.id]))
             setContratos((prev) =>
               prev.map((c) => (c.id === contrato.id ? { ...c, situacao: 'atualizado' } : c)),
@@ -654,7 +657,9 @@ function RemessaBoletosAnalisePage() {
         contrato,
         continueOnError: true,
         onIteration: ({ periodo, iterationIndex, totalIterations, success }) => {
-          const periodLabel = `${periodo.mes}/${periodo.ano}`
+          const periodLabel = periodo.tipo === 'foco'
+            ? getPeriodoLabel(analise.data_inicio_foco, analise.data_fim_foco)
+            : getPeriodoLabel(analise.data_inicio_comparacao, analise.data_fim_comparacao)
 
           setStatusMessage(
             success
@@ -896,8 +901,8 @@ function RemessaBoletosAnalisePage() {
 
     setErrorMessage('')
 
-    const periodoFoco = getPeriodoLabel(analise.mes_foco, analise.ano_foco)
-    const periodoComparacao = getPeriodoLabel(analise.mes_comparacao, analise.ano_comparacao)
+    const periodoFoco = getPeriodoLabel(analise.data_inicio_foco, analise.data_fim_foco)
+    const periodoComparacao = getPeriodoLabel(analise.data_inicio_comparacao, analise.data_fim_comparacao)
     const rows = activeRowsForPrint
     const generatedAt = new Date().toLocaleString('pt-BR')
     const modeLabel = viewMode === 'tabela' ? 'Tabela comparativa' : 'Comentarios da IA'
@@ -1651,14 +1656,14 @@ function RemessaBoletosAnalisePage() {
         <div>
           <h1 className="font-heading text-3xl font-bold text-slate-900">{analise.nome}</h1>
           <p className="mt-2 text-sm text-slate-600">
-            Comparacao de {getPeriodoLabel(analise.mes_comparacao, analise.ano_comparacao)} com{' '}
-            {getPeriodoLabel(analise.mes_foco, analise.ano_foco)}
+            Comparacao de {getPeriodoLabel(analise.data_inicio_comparacao, analise.data_fim_comparacao)} com{' '}
+            {getPeriodoLabel(analise.data_inicio_foco, analise.data_fim_foco)}
           </p>
         </div>
 
         <div className="flex flex-wrap gap-2">
           <Link
-            to={`/remessa-boletos/${analise.id}/importar`}
+            to={`/remessa-boletos/${analise.numero ?? analise.id}/importar`}
             className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:border-slate-400 hover:text-slate-900"
           >
             Importar planilha
@@ -1828,13 +1833,13 @@ function RemessaBoletosAnalisePage() {
                     className="cursor-pointer select-none px-4 py-3 font-semibold hover:text-slate-800"
                     onClick={() => handleSort('foco')}
                   >
-                    {getPeriodoLabel(analise.mes_foco, analise.ano_foco)}{getSortIndicator('foco')}
+                    {getPeriodoLabel(analise.data_inicio_foco, analise.data_fim_foco)}{getSortIndicator('foco')}
                   </th>
                   <th
                     className="cursor-pointer select-none px-4 py-3 font-semibold hover:text-slate-800"
                     onClick={() => handleSort('comparacao')}
                   >
-                    {getPeriodoLabel(analise.mes_comparacao, analise.ano_comparacao)}{getSortIndicator('comparacao')}
+                    {getPeriodoLabel(analise.data_inicio_comparacao, analise.data_fim_comparacao)}{getSortIndicator('comparacao')}
                   </th>
                   <th
                     className="cursor-pointer select-none px-4 py-3 font-semibold hover:text-slate-800"
@@ -1993,14 +1998,14 @@ function RemessaBoletosAnalisePage() {
 
                             <div className="grid gap-4 md:grid-cols-2">
                               <ExtratoMovimentosTable
-                                title={`Mes de comparacao (${getPeriodoLabel(analise.mes_comparacao, analise.ano_comparacao)})`}
+                                title={`Comparacao (${getPeriodoLabel(analise.data_inicio_comparacao, analise.data_fim_comparacao)})`}
                                 subtotal={row.subtotalComparacao}
                                 externalUrl={row.externalUrlComparacao}
                                 movimentos={row.movimentosComparacao}
                               />
 
                               <ExtratoMovimentosTable
-                                title={`Mes de foco (${getPeriodoLabel(analise.mes_foco, analise.ano_foco)})`}
+                                title={`Foco (${getPeriodoLabel(analise.data_inicio_foco, analise.data_fim_foco)})`}
                                 subtotal={row.subtotalFoco}
                                 externalUrl={row.externalUrlFoco}
                                 movimentos={row.movimentosFoco}
@@ -2047,13 +2052,13 @@ function RemessaBoletosAnalisePage() {
                   </div>
                   <div>
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                      {getPeriodoLabel(analise.mes_foco, analise.ano_foco)}
+                      {getPeriodoLabel(analise.data_inicio_foco, analise.data_fim_foco)}
                     </p>
                     <p className="mt-1 text-sm text-slate-700">{formatCurrency(row.subtotalFoco)}</p>
                   </div>
                   <div>
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                      {getPeriodoLabel(analise.mes_comparacao, analise.ano_comparacao)}
+                      {getPeriodoLabel(analise.data_inicio_comparacao, analise.data_fim_comparacao)}
                     </p>
                     <p className="mt-1 text-sm text-slate-700">{formatCurrency(row.subtotalComparacao)}</p>
                   </div>

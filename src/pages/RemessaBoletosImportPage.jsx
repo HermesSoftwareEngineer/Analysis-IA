@@ -1,22 +1,24 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
-import { getMonthLabel } from '../lib/monthOptions'
 import { parseContractsFromSpreadsheet } from '../lib/spreadsheetParser'
 import {
   coletarExtratosParaAnalise,
-  getAnaliseBoletoById,
+  getAnaliseBoletoByNumero,
   upsertContratosAnalise,
 } from '../services/remessaBoletosService'
 
 function formatPeriodo(analise) {
-  return `${getMonthLabel(analise.mes_comparacao)}/${analise.ano_comparacao} x ${getMonthLabel(
-    analise.mes_foco,
-  )}/${analise.ano_foco}`
+  const fmt = (iso) => {
+    if (!iso) return '-'
+    const [year, month, day] = iso.slice(0, 10).split('-')
+    return `${day}/${month}/${year}`
+  }
+  return `${fmt(analise.data_inicio_comparacao)} – ${fmt(analise.data_fim_comparacao)} x ${fmt(analise.data_inicio_foco)} – ${fmt(analise.data_fim_foco)}`
 }
 
 function RemessaBoletosImportPage() {
-  const { analiseId } = useParams()
+  const { analiseNumero } = useParams()
   const { user } = useAuth()
   const navigate = useNavigate()
 
@@ -35,7 +37,7 @@ function RemessaBoletosImportPage() {
       setErrorMessage('')
 
       try {
-        const data = await getAnaliseBoletoById({ analiseId, userId: user.id })
+        const data = await getAnaliseBoletoByNumero({ analiseNumero, userId: user.id })
         setAnalise(data)
       } catch (error) {
         setErrorMessage(error.message || 'Nao foi possivel carregar a analise.')
@@ -44,10 +46,10 @@ function RemessaBoletosImportPage() {
       }
     }
 
-    if (user?.id && analiseId) {
+    if (user?.id && analiseNumero) {
       loadAnalise()
     }
-  }, [analiseId, user?.id])
+  }, [analiseNumero, user?.id])
 
   async function handleFileChange(event) {
     const file = event.target.files?.[0]
@@ -61,8 +63,8 @@ function RemessaBoletosImportPage() {
 
     try {
       const parsed = await parseContractsFromSpreadsheet(file, {
-        mesFoco: analise?.mes_foco,
-        anoFoco: analise?.ano_foco,
+        dataInicioFoco: analise?.data_inicio_foco,
+        dataFimFoco: analise?.data_fim_foco,
       })
       setPreview(parsed)
     } catch (error) {
@@ -90,7 +92,7 @@ function RemessaBoletosImportPage() {
           setProgress({ processed, total })
 
           const contratoLabel = contrato.codigo_contrato || contrato.codigo_cliente
-          const periodoLabel = `${periodo.mes}/${periodo.ano}`
+          const periodoLabel = periodo.tipo
           setLiveStatus(
             success
               ? `Contrato ${contratoLabel} atualizado para ${periodoLabel} (${processed}/${total}).`
@@ -99,7 +101,9 @@ function RemessaBoletosImportPage() {
         },
       })
 
-      navigate(`/remessa-boletos/${analise.id}`, {
+      const analiseRef = analise.numero ?? analise.id
+
+      navigate(`/remessa-boletos/${analiseRef}`, {
         replace: true,
         state: {
           importSummary: result,
@@ -211,7 +215,7 @@ function RemessaBoletosImportPage() {
           {importing ? 'Importando e coletando...' : 'Importar planilha e coletar extratos'}
         </button>
         <Link
-          to={`/remessa-boletos/${analise.id}`}
+          to={`/remessa-boletos/${analise.numero ?? analise.id}`}
           className="rounded-xl border border-slate-300 px-5 py-3 text-sm font-semibold text-slate-700 transition hover:border-slate-400 hover:text-slate-900"
         >
           Ir para analise

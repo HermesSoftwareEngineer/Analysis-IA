@@ -1,30 +1,29 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
-import { getCurrentMonthYear, getPreviousMonthYear, MONTH_OPTIONS } from '../lib/monthOptions'
 import { createAnaliseBoleto } from '../services/remessaBoletosService'
 
 function RemessaBoletosNovaPage() {
   const { user } = useAuth()
   const navigate = useNavigate()
 
-  const current = getCurrentMonthYear()
-  const previous = getPreviousMonthYear()
+  const now = new Date()
+  const currentYear = now.getFullYear()
+  const currentMonth = String(now.getMonth() + 1).padStart(2, '0')
+  const lastDayFoco = new Date(currentYear, now.getMonth() + 1, 0).getDate()
+  const prevMonth = now.getMonth() === 0 ? 12 : now.getMonth()
+  const prevYear = now.getMonth() === 0 ? currentYear - 1 : currentYear
+  const lastDayComp = new Date(prevYear, prevMonth, 0).getDate()
 
   const [formData, setFormData] = useState({
     nome: '',
-    mesFoco: current.month,
-    anoFoco: current.year,
-    mesComparacao: previous.month,
-    anoComparacao: previous.year,
+    dataInicioFoco: `${currentYear}-${currentMonth}-01`,
+    dataFimFoco: `${currentYear}-${currentMonth}-${String(lastDayFoco).padStart(2, '0')}`,
+    dataInicioComparacao: `${prevYear}-${String(prevMonth).padStart(2, '0')}-01`,
+    dataFimComparacao: `${prevYear}-${String(prevMonth).padStart(2, '0')}-${String(lastDayComp).padStart(2, '0')}`,
   })
   const [loading, setLoading] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
-
-  const yearOptions = useMemo(() => {
-    const base = new Date().getFullYear()
-    return Array.from({ length: 8 }).map((_, index) => base - 4 + index)
-  }, [])
 
   function updateField(field, value) {
     setFormData((prev) => ({
@@ -41,14 +40,15 @@ function RemessaBoletosNovaPage() {
     try {
       const analise = await createAnaliseBoleto({
         nome: formData.nome.trim(),
-        mesFoco: Number(formData.mesFoco),
-        anoFoco: Number(formData.anoFoco),
-        mesComparacao: Number(formData.mesComparacao),
-        anoComparacao: Number(formData.anoComparacao),
+        dataInicioFoco: formData.dataInicioFoco,
+        dataFimFoco: formData.dataFimFoco,
+        dataInicioComparacao: formData.dataInicioComparacao,
+        dataFimComparacao: formData.dataFimComparacao,
         userId: user.id,
       })
 
-      navigate(`/remessa-boletos/${analise.id}/importar`, { replace: true })
+      const analiseRef = analise.numero ?? analise.id
+      navigate(`/remessa-boletos/${analiseRef}/importar`, { replace: true })
     } catch (error) {
       setErrorMessage(error.message || 'Nao foi possivel criar a analise.')
     } finally {
@@ -61,7 +61,7 @@ function RemessaBoletosNovaPage() {
       <header>
         <h1 className="font-heading text-3xl font-bold text-slate-900">Nova analise</h1>
         <p className="mt-2 text-sm text-slate-600">
-          Defina os meses para comparacao e depois importe a planilha de contratos.
+          Defina os periodos de foco e comparacao e depois importe a planilha de contratos.
         </p>
       </header>
 
@@ -83,75 +83,59 @@ function RemessaBoletosNovaPage() {
           </div>
 
           <div>
-            <label htmlFor="mesFoco" className="mb-1 block text-sm font-semibold text-slate-700">
-              Mes de foco
+            <label htmlFor="dataInicioFoco" className="mb-1 block text-sm font-semibold text-slate-700">
+              Periodo de foco — data de inicio
             </label>
-            <select
-              id="mesFoco"
-              value={formData.mesFoco}
-              onChange={(event) => updateField('mesFoco', event.target.value)}
+            <input
+              id="dataInicioFoco"
+              type="date"
+              required
+              value={formData.dataInicioFoco}
+              onChange={(event) => updateField('dataInicioFoco', event.target.value)}
               className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-2 focus:ring-cyan-100"
-            >
-              {MONTH_OPTIONS.map((month) => (
-                <option key={month.value} value={month.value}>
-                  {month.label}
-                </option>
-              ))}
-            </select>
+            />
           </div>
 
           <div>
-            <label htmlFor="anoFoco" className="mb-1 block text-sm font-semibold text-slate-700">
-              Ano de foco
+            <label htmlFor="dataFimFoco" className="mb-1 block text-sm font-semibold text-slate-700">
+              Periodo de foco — data de fim
             </label>
-            <select
-              id="anoFoco"
-              value={formData.anoFoco}
-              onChange={(event) => updateField('anoFoco', event.target.value)}
+            <input
+              id="dataFimFoco"
+              type="date"
+              required
+              value={formData.dataFimFoco}
+              onChange={(event) => updateField('dataFimFoco', event.target.value)}
               className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-2 focus:ring-cyan-100"
-            >
-              {yearOptions.map((year) => (
-                <option key={year} value={year}>
-                  {year}
-                </option>
-              ))}
-            </select>
+            />
           </div>
 
           <div>
-            <label htmlFor="mesComparacao" className="mb-1 block text-sm font-semibold text-slate-700">
-              Mes de comparacao
+            <label htmlFor="dataInicioComparacao" className="mb-1 block text-sm font-semibold text-slate-700">
+              Periodo de comparacao — data de inicio
             </label>
-            <select
-              id="mesComparacao"
-              value={formData.mesComparacao}
-              onChange={(event) => updateField('mesComparacao', event.target.value)}
+            <input
+              id="dataInicioComparacao"
+              type="date"
+              required
+              value={formData.dataInicioComparacao}
+              onChange={(event) => updateField('dataInicioComparacao', event.target.value)}
               className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-2 focus:ring-cyan-100"
-            >
-              {MONTH_OPTIONS.map((month) => (
-                <option key={month.value} value={month.value}>
-                  {month.label}
-                </option>
-              ))}
-            </select>
+            />
           </div>
 
           <div>
-            <label htmlFor="anoComparacao" className="mb-1 block text-sm font-semibold text-slate-700">
-              Ano de comparacao
+            <label htmlFor="dataFimComparacao" className="mb-1 block text-sm font-semibold text-slate-700">
+              Periodo de comparacao — data de fim
             </label>
-            <select
-              id="anoComparacao"
-              value={formData.anoComparacao}
-              onChange={(event) => updateField('anoComparacao', event.target.value)}
+            <input
+              id="dataFimComparacao"
+              type="date"
+              required
+              value={formData.dataFimComparacao}
+              onChange={(event) => updateField('dataFimComparacao', event.target.value)}
               className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-2 focus:ring-cyan-100"
-            >
-              {yearOptions.map((year) => (
-                <option key={year} value={year}>
-                  {year}
-                </option>
-              ))}
-            </select>
+            />
           </div>
         </div>
 

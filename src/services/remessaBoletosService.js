@@ -6,6 +6,11 @@ function normalizeNumber(value) {
   return Number.isFinite(parsed) ? parsed : 0
 }
 
+function normalizePositiveInteger(value) {
+  const parsed = Number.parseInt(String(value ?? ''), 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+}
+
 function parseDateBrToIso(value) {
   if (!value) {
     return null
@@ -190,7 +195,7 @@ export async function listAnalisesBoletos() {
   const { data, error } = await supabase
     .from('analises_boletos')
     .select(
-      'id, nome, mes_foco, ano_foco, mes_comparacao, ano_comparacao, created_at, contratos_analise(count)',
+      'id, numero, nome, data_inicio_foco, data_fim_foco, data_inicio_comparacao, data_fim_comparacao, created_at, contratos_analise(count)',
     )
     .order('created_at', { ascending: false })
 
@@ -206,20 +211,20 @@ export async function listAnalisesBoletos() {
 
 export async function createAnaliseBoleto({
   nome,
-  mesFoco,
-  anoFoco,
-  mesComparacao,
-  anoComparacao,
+  dataInicioFoco,
+  dataFimFoco,
+  dataInicioComparacao,
+  dataFimComparacao,
   userId,
 }) {
   const { data, error } = await supabase
     .from('analises_boletos')
     .insert({
       nome,
-      mes_foco: mesFoco,
-      ano_foco: anoFoco,
-      mes_comparacao: mesComparacao,
-      ano_comparacao: anoComparacao,
+      data_inicio_foco: dataInicioFoco,
+      data_fim_foco: dataFimFoco,
+      data_inicio_comparacao: dataInicioComparacao,
+      data_fim_comparacao: dataFimComparacao,
       user_id: userId,
     })
     .select('*')
@@ -232,10 +237,16 @@ export async function createAnaliseBoleto({
   return data
 }
 
-export async function updateAnaliseBoleto({ analiseId, nome, mesFoco, anoFoco, mesComparacao, anoComparacao }) {
+export async function updateAnaliseBoleto({ analiseId, nome, dataInicioFoco, dataFimFoco, dataInicioComparacao, dataFimComparacao }) {
   const { data, error } = await supabase
     .from('analises_boletos')
-    .update({ nome, mes_foco: mesFoco, ano_foco: anoFoco, mes_comparacao: mesComparacao, ano_comparacao: anoComparacao })
+    .update({
+      nome,
+      data_inicio_foco: dataInicioFoco,
+      data_fim_foco: dataFimFoco,
+      data_inicio_comparacao: dataInicioComparacao,
+      data_fim_comparacao: dataFimComparacao,
+    })
     .eq('id', analiseId)
     .select('*')
     .single()
@@ -318,6 +329,32 @@ export async function getAnaliseBoletoById({ analiseId }) {
       .select('*')
       .eq('id', analiseId)
       .single()
+
+    if (response.error) {
+      throw response.error
+    }
+
+    return response
+  })
+
+  if (error) {
+    throw error
+  }
+
+  return data
+}
+
+export async function getAnaliseBoletoByNumero({ analiseNumero }) {
+  const numero = normalizePositiveInteger(analiseNumero)
+
+  const { data, error } = await withRetry(async () => {
+    const query = supabase
+      .from('analises_boletos')
+      .select('*')
+
+    const response = numero
+      ? await query.eq('numero', numero).single()
+      : await query.eq('id', String(analiseNumero ?? '')).single()
 
     if (response.error) {
       throw response.error
@@ -421,8 +458,7 @@ async function updateContratoMetadata({ contrato, normalizedExtrato }) {
 export async function upsertExtratoComMovimentos({
   analiseId,
   contrato,
-  mes,
-  ano,
+  periodoTipo,
   normalizedExtrato,
 }) {
   const resolvedCodigoContrato =
@@ -449,8 +485,7 @@ export async function upsertExtratoComMovimentos({
         .eq('analise_id', analiseId)
         .eq('codigo_cliente', contrato.codigo_cliente)
         .eq('codigo_contrato', ctr)
-        .eq('mes', mes)
-        .eq('ano', ano)
+        .eq('periodo_tipo', periodoTipo)
 
       if (cleanupError) {
         throw cleanupError
@@ -462,15 +497,14 @@ export async function upsertExtratoComMovimentos({
     analise_id: analiseId,
     codigo_cliente: contrato.codigo_cliente,
     codigo_contrato: resolvedCodigoContrato,
-    mes,
-    ano,
+    periodo_tipo: periodoTipo,
     subtotal: normalizeNumber(normalizedExtrato.subtotal),
     dados_json: normalizedExtrato.dadosJson,
   }
 
   const { data: extratoRow, error: extratoError } = await supabase
     .from('extratos_boletos')
-    .upsert(upsertPayload, { onConflict: 'analise_id,codigo_cliente,codigo_contrato,mes,ano' })
+    .upsert(upsertPayload, { onConflict: 'analise_id,codigo_cliente,codigo_contrato,periodo_tipo' })
     .select('*')
     .single()
 
@@ -517,8 +551,8 @@ export async function coletarExtratosParaContrato({
   continueOnError = false,
 }) {
   const periodos = [
-    { mes: analise.mes_foco, ano: analise.ano_foco },
-    { mes: analise.mes_comparacao, ano: analise.ano_comparacao },
+    { tipo: 'foco',       dataInicio: analise.data_inicio_foco,       dataFim: analise.data_fim_foco },
+    { tipo: 'comparacao', dataInicio: analise.data_inicio_comparacao, dataFim: analise.data_fim_comparacao },
   ]
 
   const errors = []
@@ -527,26 +561,30 @@ export async function coletarExtratosParaContrato({
     const periodo = periodos[iterationIndex]
 
     try {
-      const response = await fetchMovimentosImoview({
-        codigoContrato: contrato.codigo_contrato,
-        ano: periodo.ano,
-        mes: periodo.mes,
-      })
+      await withRetry(
+        async () => {
+          const response = await fetchMovimentosImoview({
+            codigoContrato: contrato.codigo_contrato,
+            dataInicial: periodo.dataInicio,
+            dataFinal: periodo.dataFim,
+          })
 
-      const normalizedExtrato = normalizeMovimentosPayload(response, {
-        codigoContrato: contrato.codigo_contrato,
-        codigoImovel: contrato.codigo_imovel,
-        mes: periodo.mes,
-        ano: periodo.ano,
-      })
+          const normalizedExtrato = normalizeMovimentosPayload(response, {
+            codigoContrato: contrato.codigo_contrato,
+            codigoImovel: contrato.codigo_imovel,
+            dataInicio: periodo.dataInicio,
+            dataFim: periodo.dataFim,
+          })
 
-      await upsertExtratoComMovimentos({
-        analiseId: analise.id,
-        contrato,
-        mes: periodo.mes,
-        ano: periodo.ano,
-        normalizedExtrato,
-      })
+          await upsertExtratoComMovimentos({
+            analiseId: analise.id,
+            contrato,
+            periodoTipo: periodo.tipo,
+            normalizedExtrato,
+          })
+        },
+        { retries: 3, baseDelayMs: 500, maxDelayMs: 4000 },
+      )
 
       onIteration?.({
         contrato,
@@ -557,10 +595,14 @@ export async function coletarExtratosParaContrato({
         errorMessage: '',
       })
     } catch (error) {
+      const contratoLabel = contrato.codigo_contrato || contrato.codigo_cliente || '?'
+      const enrichedMessage = `Contrato ${contratoLabel} (${periodo.tipo}): ${error.message}`
+      const enrichedError = new Error(enrichedMessage)
+
       errors.push({
         contrato,
         periodo,
-        message: error.message,
+        message: enrichedMessage,
       })
 
       onIteration?.({
@@ -569,11 +611,11 @@ export async function coletarExtratosParaContrato({
         iterationIndex: iterationIndex + 1,
         totalIterations: periodos.length,
         success: false,
-        errorMessage: error.message,
+        errorMessage: enrichedMessage,
       })
 
       if (!continueOnError) {
-        throw error
+        throw enrichedError
       }
     }
   }
@@ -626,7 +668,7 @@ export async function coletarExtratosParaAnalise({ analise, contratos, onProgres
     errors.push({
       codigoContrato: contrato.codigo_contrato,
       codigoCliente: contrato.codigo_cliente,
-      message: `Falha em ${result.failedIterations} periodo(s) do contrato.`,
+      message: `Contrato ${contrato.codigo_contrato || contrato.codigo_cliente}: falha em ${result.failedIterations} periodo(s) apos retentativas.`,
       details: result.errors,
     })
   }
@@ -655,7 +697,7 @@ export async function loadComparativoAnalise(analiseId) {
   const { data: extratosBase } = await withRetry(async () => {
     const response = await supabase
       .from('extratos_boletos')
-      .select('id, analise_id, codigo_cliente, codigo_contrato, mes, ano, subtotal, dados_json, created_at')
+      .select('id, analise_id, codigo_cliente, codigo_contrato, periodo_tipo, subtotal, dados_json, created_at')
       .eq('analise_id', analiseId)
 
     if (response.error) {

@@ -2,17 +2,16 @@ import { Fragment, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import ExtratoMovimentosTable from '../components/ExtratoMovimentosTable'
 import { formatCurrency } from '../lib/currency'
-import {
-  getCurrentMonthYear,
-  getMonthLabel,
-  getPreviousMonthYear,
-  MONTH_OPTIONS,
-} from '../lib/monthOptions'
 import { parseContractsFromSpreadsheet } from '../lib/spreadsheetParser'
 import { fetchMovimentosImoview, normalizeMovimentosPayload } from '../services/imoviewService'
 
-function getPeriodoLabel(mes, ano) {
-  return `${getMonthLabel(mes)} / ${ano}`
+function formatPeriodoRange(dataInicio, dataFim) {
+  const fmt = (iso) => {
+    if (!iso) return '-'
+    const [year, month, day] = iso.slice(0, 10).split('-')
+    return `${day}/${month}/${year}`
+  }
+  return `${fmt(dataInicio)} – ${fmt(dataFim)}`
 }
 
 function getDifferenceClass(difference) {
@@ -59,30 +58,65 @@ async function runWithConcurrency(items, concurrency, worker) {
   return results
 }
 
-async function fetchPeriodoNormalized({ contrato, mes, ano }) {
-  const response = await fetchMovimentosImoview({
-    codigoContrato: contrato.codigoContrato,
-    mes,
-    ano,
-  })
+const RAPIDA_MAX_RETRIES = 3
+const RAPIDA_BASE_DELAY_MS = 500
+const RAPIDA_MAX_DELAY_MS = 4000
 
-  return normalizeMovimentosPayload(response, {
-    codigoContrato: contrato.codigoContrato,
-    codigoImovel: contrato.codigoImovel,
-    mes,
-    ano,
-  })
+async function withRetry(operation, retries, baseDelayMs, maxDelayMs) {
+  let attempt = 0
+  let lastError = null
+
+  while (attempt <= retries) {
+    try {
+      return await operation()
+    } catch (error) {
+      lastError = error
+      if (attempt >= retries) break
+      const delay = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt)
+      await new Promise((resolve) => { setTimeout(resolve, delay) })
+      attempt += 1
+    }
+  }
+
+  throw lastError
+}
+
+async function fetchPeriodoNormalized({ contrato, dataInicial, dataFinal }) {
+  return withRetry(
+    async () => {
+      const response = await fetchMovimentosImoview({
+        codigoContrato: contrato.codigoContrato,
+        dataInicial,
+        dataFinal,
+      })
+
+      return normalizeMovimentosPayload(response, {
+        codigoContrato: contrato.codigoContrato,
+        codigoImovel: contrato.codigoImovel,
+        dataInicio: dataInicial,
+        dataFim: dataFinal,
+      })
+    },
+    RAPIDA_MAX_RETRIES,
+    RAPIDA_BASE_DELAY_MS,
+    RAPIDA_MAX_DELAY_MS,
+  )
 }
 
 function RemessaBoletosRapidaPage() {
-  const current = getCurrentMonthYear()
-  const previous = getPreviousMonthYear()
+  const now = new Date()
+  const yr = now.getFullYear()
+  const mo = String(now.getMonth() + 1).padStart(2, '0')
+  const lastDayFoco = new Date(yr, now.getMonth() + 1, 0).getDate()
+  const prevMo = now.getMonth() === 0 ? 12 : now.getMonth()
+  const prevYr = now.getMonth() === 0 ? yr - 1 : yr
+  const lastDayComp = new Date(prevYr, prevMo, 0).getDate()
 
   const [formData, setFormData] = useState({
-    mesFoco: current.month,
-    anoFoco: current.year,
-    mesComparacao: previous.month,
-    anoComparacao: previous.year,
+    dataInicioFoco: `${yr}-${mo}-01`,
+    dataFimFoco: `${yr}-${mo}-${String(lastDayFoco).padStart(2, '0')}`,
+    dataInicioComparacao: `${prevYr}-${String(prevMo).padStart(2, '0')}-01`,
+    dataFimComparacao: `${prevYr}-${String(prevMo).padStart(2, '0')}-${String(lastDayComp).padStart(2, '0')}`,
   })
   const [selectedFile, setSelectedFile] = useState(null)
   const [preview, setPreview] = useState(null)
@@ -94,11 +128,6 @@ function RemessaBoletosRapidaPage() {
   const [rows, setRows] = useState([])
   const [search, setSearch] = useState('')
   const [expandedRows, setExpandedRows] = useState(new Set())
-
-  const yearOptions = useMemo(() => {
-    const base = new Date().getFullYear()
-    return Array.from({ length: 8 }).map((_, index) => base - 4 + index)
-  }, [])
 
   const filteredRows = useMemo(() => {
     const query = search.trim().toLowerCase()
@@ -161,8 +190,8 @@ function RemessaBoletosRapidaPage() {
     setLoadingPreview(true)
     try {
       const parsed = await parseContractsFromSpreadsheet(file, {
-        mesFoco: Number(formData.mesFoco),
-        anoFoco: Number(formData.anoFoco),
+        dataInicioFoco: formData.dataInicioFoco,
+        dataFimFoco: formData.dataFimFoco,
       })
       setPreview(parsed)
     } catch (error) {
@@ -184,15 +213,13 @@ function RemessaBoletosRapidaPage() {
     setRows([])
     setExpandedRows(new Set())
 
-    const mesFoco = Number(formData.mesFoco)
-    const anoFoco = Number(formData.anoFoco)
-    const mesComparacao = Number(formData.mesComparacao)
-    const anoComparacao = Number(formData.anoComparacao)
+    const { dataInicioFoco, dataFimFoco, dataInicioComparacao, dataFimComparacao } = formData
     const concurrency = resolveQuickConcurrency()
 
     const totalIterations = contracts.length * 2
     let processed = 0
     let failedContracts = 0
+    const failedLabels = []
     const bumpProgress = (current) => {
       processed += 1
       setProgress({ processed, total: totalIterations, current })
@@ -204,13 +231,13 @@ function RemessaBoletosRapidaPage() {
       const [focoResult, comparacaoResult] = await Promise.allSettled([
         fetchPeriodoNormalized({
           contrato,
-          mes: mesFoco,
-          ano: anoFoco,
+          dataInicial: dataInicioFoco,
+          dataFinal: dataFimFoco,
         }).finally(() => bumpProgress(contratoLabel)),
         fetchPeriodoNormalized({
           contrato,
-          mes: mesComparacao,
-          ano: anoComparacao,
+          dataInicial: dataInicioComparacao,
+          dataFinal: dataFimComparacao,
         }).finally(() => bumpProgress(contratoLabel)),
       ])
 
@@ -220,6 +247,11 @@ function RemessaBoletosRapidaPage() {
 
       if (hasError) {
         failedContracts += 1
+        failedLabels.push(contratoLabel)
+        const focoErr = focoResult.status === 'rejected' ? focoResult.reason?.message : null
+        const compErr = comparacaoResult.status === 'rejected' ? comparacaoResult.reason?.message : null
+        const detail = [focoErr, compErr].filter(Boolean).join('; ')
+        console.warn(`[Remessa rapida] Falha no contrato ${contratoLabel}: ${detail}`)
       }
 
       const subtotalFoco = Number(focoNormalized?.subtotal ?? 0)
@@ -245,7 +277,8 @@ function RemessaBoletosRapidaPage() {
     setRows(nextRows.sort((a, b) => b.difference - a.difference))
 
     if (failedContracts > 0) {
-      setErrorMessage(`Analise rapida finalizada com ${failedContracts} contrato(s) com falha em ao menos um periodo.`)
+      const labelsText = failedLabels.join(', ')
+      setErrorMessage(`Analise rapida finalizada com ${failedContracts} contrato(s) com falha apos ${RAPIDA_MAX_RETRIES + 1} tentativas: ${labelsText}.`)
     }
 
     setStatusMessage(
@@ -271,52 +304,40 @@ function RemessaBoletosRapidaPage() {
       <div className="rounded-2xl border border-slate-200 bg-white p-6 space-y-5">
         <div className="grid gap-4 md:grid-cols-2">
           <div>
-            <label className="mb-1 block text-sm font-semibold text-slate-700">Mes de foco</label>
-            <select
-              value={formData.mesFoco}
-              onChange={(event) => updateField('mesFoco', event.target.value)}
+            <label className="mb-1 block text-sm font-semibold text-slate-700">Foco — data de inicio</label>
+            <input
+              type="date"
+              value={formData.dataInicioFoco}
+              onChange={(event) => updateField('dataInicioFoco', event.target.value)}
               className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-2 focus:ring-cyan-100"
-            >
-              {MONTH_OPTIONS.map((month) => (
-                <option key={month.value} value={month.value}>{month.label}</option>
-              ))}
-            </select>
+            />
           </div>
           <div>
-            <label className="mb-1 block text-sm font-semibold text-slate-700">Ano de foco</label>
-            <select
-              value={formData.anoFoco}
-              onChange={(event) => updateField('anoFoco', event.target.value)}
+            <label className="mb-1 block text-sm font-semibold text-slate-700">Foco — data de fim</label>
+            <input
+              type="date"
+              value={formData.dataFimFoco}
+              onChange={(event) => updateField('dataFimFoco', event.target.value)}
               className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-2 focus:ring-cyan-100"
-            >
-              {yearOptions.map((year) => (
-                <option key={year} value={year}>{year}</option>
-              ))}
-            </select>
+            />
           </div>
           <div>
-            <label className="mb-1 block text-sm font-semibold text-slate-700">Mes de comparacao</label>
-            <select
-              value={formData.mesComparacao}
-              onChange={(event) => updateField('mesComparacao', event.target.value)}
+            <label className="mb-1 block text-sm font-semibold text-slate-700">Comparacao — data de inicio</label>
+            <input
+              type="date"
+              value={formData.dataInicioComparacao}
+              onChange={(event) => updateField('dataInicioComparacao', event.target.value)}
               className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-2 focus:ring-cyan-100"
-            >
-              {MONTH_OPTIONS.map((month) => (
-                <option key={month.value} value={month.value}>{month.label}</option>
-              ))}
-            </select>
+            />
           </div>
           <div>
-            <label className="mb-1 block text-sm font-semibold text-slate-700">Ano de comparacao</label>
-            <select
-              value={formData.anoComparacao}
-              onChange={(event) => updateField('anoComparacao', event.target.value)}
+            <label className="mb-1 block text-sm font-semibold text-slate-700">Comparacao — data de fim</label>
+            <input
+              type="date"
+              value={formData.dataFimComparacao}
+              onChange={(event) => updateField('dataFimComparacao', event.target.value)}
               className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-2 focus:ring-cyan-100"
-            >
-              {yearOptions.map((year) => (
-                <option key={year} value={year}>{year}</option>
-              ))}
-            </select>
+            />
           </div>
         </div>
 
@@ -414,8 +435,8 @@ function RemessaBoletosRapidaPage() {
                     <th className="px-4 py-3 font-semibold">Codigo Contrato</th>
                     <th className="px-4 py-3 font-semibold">Locatario</th>
                     <th className="px-4 py-3 font-semibold">Locador</th>
-                    <th className="px-4 py-3 font-semibold">{getPeriodoLabel(formData.mesFoco, formData.anoFoco)}</th>
-                    <th className="px-4 py-3 font-semibold">{getPeriodoLabel(formData.mesComparacao, formData.anoComparacao)}</th>
+                    <th className="px-4 py-3 font-semibold">{formatPeriodoRange(formData.dataInicioFoco, formData.dataFimFoco)}</th>
+                    <th className="px-4 py-3 font-semibold">{formatPeriodoRange(formData.dataInicioComparacao, formData.dataFimComparacao)}</th>
                     <th className="px-4 py-3 font-semibold">Diferenca</th>
                     <th className="px-4 py-3 font-semibold">Acoes</th>
                   </tr>
@@ -453,14 +474,14 @@ function RemessaBoletosRapidaPage() {
                             <td colSpan={7} className="bg-slate-50 px-4 py-4">
                               <div className="grid gap-4 md:grid-cols-2">
                                 <ExtratoMovimentosTable
-                                  title={`Mes de comparacao (${getPeriodoLabel(formData.mesComparacao, formData.anoComparacao)})`}
+                                  title={`Comparacao (${formatPeriodoRange(formData.dataInicioComparacao, formData.dataFimComparacao)})`}
                                   subtotal={row.subtotalComparacao}
                                   externalUrl=""
                                   movimentos={row.movimentosComparacao}
                                 />
 
                                 <ExtratoMovimentosTable
-                                  title={`Mes de foco (${getPeriodoLabel(formData.mesFoco, formData.anoFoco)})`}
+                                  title={`Foco (${formatPeriodoRange(formData.dataInicioFoco, formData.dataFimFoco)})`}
                                   subtotal={row.subtotalFoco}
                                   externalUrl=""
                                   movimentos={row.movimentosFoco}

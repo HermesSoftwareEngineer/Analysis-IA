@@ -95,8 +95,8 @@ function AppRoutes() {
           <Route path="/remessa-boletos" element={<RemessaBoletosPage />} />
           <Route path="/remessa-boletos/rapida" element={<RemessaBoletosRapidaPage />} />
           <Route path="/remessa-boletos/nova" element={<RemessaBoletosNovaPage />} />
-          <Route path="/remessa-boletos/:analiseId/importar" element={<RemessaBoletosImportPage />} />
-          <Route path="/remessa-boletos/:analiseId" element={<RemessaBoletosAnalisePage />} />
+          <Route path="/remessa-boletos/:analiseNumero/importar" element={<RemessaBoletosImportPage />} />
+          <Route path="/remessa-boletos/:analiseNumero" element={<RemessaBoletosAnalisePage />} />
           <Route
             path="/configuracoes"
             element={

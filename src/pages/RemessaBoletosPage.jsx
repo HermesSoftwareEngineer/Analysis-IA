@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
-import { getMonthLabel, MONTH_OPTIONS } from '../lib/monthOptions'
 import {
   deleteAnaliseBoleto,
   listAnalisesBoletos,
@@ -16,8 +15,13 @@ function formatDate(dateValue) {
   })
 }
 
-function formatPeriodo(month, year) {
-  return `${getMonthLabel(month)} / ${year}`
+function formatPeriodoRange(dataInicio, dataFim) {
+  const fmt = (iso) => {
+    if (!iso) return '-'
+    const [year, month, day] = iso.slice(0, 10).split('-')
+    return `${day}/${month}/${year}`
+  }
+  return `${fmt(dataInicio)} – ${fmt(dataFim)}`
 }
 
 function RemessaBoletosPage() {
@@ -69,10 +73,10 @@ function RemessaBoletosPage() {
     setEditError('')
     setEditForm({
       nome: analise.nome,
-      mesFoco: analise.mes_foco,
-      anoFoco: analise.ano_foco,
-      mesComparacao: analise.mes_comparacao,
-      anoComparacao: analise.ano_comparacao,
+      dataInicioFoco: analise.data_inicio_foco,
+      dataFimFoco: analise.data_fim_foco,
+      dataInicioComparacao: analise.data_inicio_comparacao,
+      dataFimComparacao: analise.data_fim_comparacao,
     })
   }
 
@@ -86,10 +90,10 @@ function RemessaBoletosPage() {
         analiseId: editingAnalise.id,
         userId: user.id,
         nome: editForm.nome.trim(),
-        mesFoco: Number(editForm.mesFoco),
-        anoFoco: Number(editForm.anoFoco),
-        mesComparacao: Number(editForm.mesComparacao),
-        anoComparacao: Number(editForm.anoComparacao),
+        dataInicioFoco: editForm.dataInicioFoco,
+        dataFimFoco: editForm.dataFimFoco,
+        dataInicioComparacao: editForm.dataInicioComparacao,
+        dataFimComparacao: editForm.dataFimComparacao,
       })
       setEditingAnalise(null)
       await loadAnalises()
@@ -171,8 +175,8 @@ function RemessaBoletosPage() {
             <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
               <tr>
                 <th className="px-4 py-3 font-semibold">Nome da analise</th>
-                <th className="px-4 py-3 font-semibold">Mes de foco</th>
-                <th className="px-4 py-3 font-semibold">Mes de comparacao</th>
+                <th className="px-4 py-3 font-semibold">Periodo de foco</th>
+                <th className="px-4 py-3 font-semibold">Periodo de comparacao</th>
                 <th className="px-4 py-3 font-semibold">Contratos</th>
                 <th className="px-4 py-3 font-semibold">Criacao</th>
                 <th className="px-4 py-3 font-semibold">Acoes</th>
@@ -199,16 +203,16 @@ function RemessaBoletosPage() {
                 ? filteredAnalises.map((analise) => (
                     <tr key={analise.id} className="hover:bg-slate-50/70">
                       <td className="px-4 py-3 font-semibold text-slate-900">{analise.nome}</td>
-                      <td className="px-4 py-3">{formatPeriodo(analise.mes_foco, analise.ano_foco)}</td>
+                      <td className="px-4 py-3">{formatPeriodoRange(analise.data_inicio_foco, analise.data_fim_foco)}</td>
                       <td className="px-4 py-3">
-                        {formatPeriodo(analise.mes_comparacao, analise.ano_comparacao)}
+                        {formatPeriodoRange(analise.data_inicio_comparacao, analise.data_fim_comparacao)}
                       </td>
                       <td className="px-4 py-3">{analise.quantidade_contratos}</td>
                       <td className="px-4 py-3">{formatDate(analise.created_at)}</td>
                       <td className="px-4 py-3">
                         <div className="flex flex-wrap gap-2">
                           <Link
-                            to={`/remessa-boletos/${analise.id}`}
+                            to={`/remessa-boletos/${analise.numero ?? analise.id}`}
                             className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-slate-400 hover:text-slate-900"
                           >
                             Abrir
@@ -257,48 +261,44 @@ function RemessaBoletosPage() {
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="mb-1 block text-sm font-semibold text-slate-700">Mes de foco</label>
-                  <select
-                    value={editForm.mesFoco}
-                    onChange={(e) => setEditForm((p) => ({ ...p, mesFoco: e.target.value }))}
+                  <label className="mb-1 block text-sm font-semibold text-slate-700">Foco — inicio</label>
+                  <input
+                    type="date"
+                    required
+                    value={editForm.dataInicioFoco ?? ''}
+                    onChange={(e) => setEditForm((p) => ({ ...p, dataInicioFoco: e.target.value }))}
                     className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-2 focus:ring-cyan-100"
-                  >
-                    {MONTH_OPTIONS.map((m) => (
-                      <option key={m.value} value={m.value}>{m.label}</option>
-                    ))}
-                  </select>
+                  />
                 </div>
                 <div>
-                  <label className="mb-1 block text-sm font-semibold text-slate-700">Ano de foco</label>
-                  <select
-                    value={editForm.anoFoco}
-                    onChange={(e) => setEditForm((p) => ({ ...p, anoFoco: e.target.value }))}
+                  <label className="mb-1 block text-sm font-semibold text-slate-700">Foco — fim</label>
+                  <input
+                    type="date"
+                    required
+                    value={editForm.dataFimFoco ?? ''}
+                    onChange={(e) => setEditForm((p) => ({ ...p, dataFimFoco: e.target.value }))}
                     className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-2 focus:ring-cyan-100"
-                  >
-                    {yearOptions.map((y) => <option key={y} value={y}>{y}</option>)}
-                  </select>
+                  />
                 </div>
                 <div>
-                  <label className="mb-1 block text-sm font-semibold text-slate-700">Mes de comparacao</label>
-                  <select
-                    value={editForm.mesComparacao}
-                    onChange={(e) => setEditForm((p) => ({ ...p, mesComparacao: e.target.value }))}
+                  <label className="mb-1 block text-sm font-semibold text-slate-700">Comparacao — inicio</label>
+                  <input
+                    type="date"
+                    required
+                    value={editForm.dataInicioComparacao ?? ''}
+                    onChange={(e) => setEditForm((p) => ({ ...p, dataInicioComparacao: e.target.value }))}
                     className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-2 focus:ring-cyan-100"
-                  >
-                    {MONTH_OPTIONS.map((m) => (
-                      <option key={m.value} value={m.value}>{m.label}</option>
-                    ))}
-                  </select>
+                  />
                 </div>
                 <div>
-                  <label className="mb-1 block text-sm font-semibold text-slate-700">Ano de comparacao</label>
-                  <select
-                    value={editForm.anoComparacao}
-                    onChange={(e) => setEditForm((p) => ({ ...p, anoComparacao: e.target.value }))}
+                  <label className="mb-1 block text-sm font-semibold text-slate-700">Comparacao — fim</label>
+                  <input
+                    type="date"
+                    required
+                    value={editForm.dataFimComparacao ?? ''}
+                    onChange={(e) => setEditForm((p) => ({ ...p, dataFimComparacao: e.target.value }))}
                     className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none transition focus:border-cyan-400 focus:ring-2 focus:ring-cyan-100"
-                  >
-                    {yearOptions.map((y) => <option key={y} value={y}>{y}</option>)}
-                  </select>
+                  />
                 </div>
               </div>
 

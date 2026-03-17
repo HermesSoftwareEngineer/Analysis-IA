@@ -3,6 +3,7 @@ create extension if not exists pgcrypto;
 
 create table if not exists public.analises_boletos (
   id uuid primary key default gen_random_uuid(),
+  numero bigint generated always as identity unique,
   nome text not null,
   mes_foco smallint not null check (mes_foco between 1 and 12),
   ano_foco integer not null check (ano_foco >= 2000),

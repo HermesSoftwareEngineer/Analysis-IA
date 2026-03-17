@@ -79,17 +79,21 @@ function parseDateString(value) {
   return Number.isNaN(asDate.getTime()) ? null : asDate
 }
 
-function getRescisaoWindow({ mesFoco, anoFoco }) {
-  const focusMonth = Number(mesFoco)
-  const focusYear = Number(anoFoco)
-
-  if (!focusMonth || !focusYear) {
+function getRescisaoWindow({ dataInicioFoco, dataFimFoco }) {
+  if (!dataInicioFoco || !dataFimFoco) {
     return null
   }
 
-  // Margem de 1 mes em torno do periodo foco: mes anterior ate o mes posterior.
-  const start = new Date(focusYear, focusMonth - 2, 1)
-  const end = new Date(focusYear, focusMonth + 1, 0, 23, 59, 59, 999)
+  const startDate = new Date(dataInicioFoco + 'T00:00:00')
+  const endDate = new Date(dataFimFoco + 'T00:00:00')
+
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+    return null
+  }
+
+  // Margem de 1 mes antes do inicio e 1 mes depois do fim do periodo foco.
+  const start = new Date(startDate.getFullYear(), startDate.getMonth() - 1, 1)
+  const end = new Date(endDate.getFullYear(), endDate.getMonth() + 2, 0, 23, 59, 59, 999)
 
   return { start, end }
 }
