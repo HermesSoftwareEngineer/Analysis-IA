@@ -216,6 +216,8 @@ function RemessaBoletosAnalisePage() {
   const [updatingAll, setUpdatingAll] = useState(false)
   const [updatingContractKey, setUpdatingContractKey] = useState('')
   const [batchProgress, setBatchProgress] = useState({ processed: 0, total: 0, currentContract: '' })
+  // IDs dos contratos concluídos durante a sessão atual de "Atualizar Valores", em ordem de conclusão
+  const [updatedContratoOrder, setUpdatedContratoOrder] = useState([])
   const [analyzingAllWithIA, setAnalyzingAllWithIA] = useState(false)
   const [analyzingContractKey, setAnalyzingContractKey] = useState('')
   const [aiProgress, setAiProgress] = useState({ processed: 0, total: 0, currentContract: '' })
@@ -401,15 +403,12 @@ function RemessaBoletosAnalisePage() {
           ? differenceFiltered.filter((row) => !String(row.contrato.analise_ia ?? '').trim())
           : differenceFiltered
 
-    // Durante Atualizar Valores: exibe apenas contratos já atualizados nesta sessão
-    const filtered = updatingAll
-      ? iaAnalysisFiltered.filter((row) => updatedIds.has(row.contrato.id))
-      : iaAnalysisFiltered
-
+    // Durante Atualizar Valores: contratos pendentes mantêm a ordem normal no topo;
+    // contratos já atualizados aparecem no final, na ordem em que foram concluídos
     const { column, dir } = sortConfig
     const sign = dir === 'asc' ? 1 : -1
 
-    return [...filtered].sort((a, b) => {
+    const sortFn = (a, b) => {
       switch (column) {
         case 'contrato':
           return sign * (a.contrato.codigo_contrato ?? '').localeCompare(b.contrato.codigo_contrato ?? '')
@@ -425,8 +424,16 @@ function RemessaBoletosAnalisePage() {
         default:
           return sign * (a.difference - b.difference)
       }
-    })
-  }, [rows, search, statusFilter, differenceFilter, iaAnalysisFilter, sortConfig, updatingAll, updatedIds])
+    }
+
+    if (updatingAll) {
+      return updatedContratoOrder
+        .map((id) => iaAnalysisFiltered.find((row) => row.contrato.id === id))
+        .filter(Boolean)
+    }
+
+    return [...iaAnalysisFiltered].sort(sortFn)
+  }, [rows, search, statusFilter, differenceFilter, iaAnalysisFilter, sortConfig, updatingAll, updatedContratoOrder])
 
   const iaCommentRows = useMemo(() => filteredAndSortedRows, [filteredAndSortedRows])
   const iaRowsWithoutAnalysisCount = useMemo(
@@ -585,6 +592,7 @@ function RemessaBoletosAnalisePage() {
     setStatusMessage('')
     setErrorMessage('')
     setBatchProgress({ processed: 0, total: contratos.length, currentContract: '' })
+    setUpdatedContratoOrder([])
 
     // Reseta situação localmente e no banco antes de iniciar
     setUpdatedIds(new Set())
@@ -599,31 +607,44 @@ function RemessaBoletosAnalisePage() {
       const result = await coletarExtratosParaAnalise({
         analise,
         contratos,
-        onProgress: ({ processed, total, contrato, periodo, success }) => {
+        onProgress: ({ processed, total, contrato, periodo, success, attempt, maxAttempts }) => {
           const contractLabel = contrato.codigo_contrato || contrato.codigo_cliente
           const periodoLabel = periodo.tipo === 'foco'
             ? getPeriodoLabel(analise.data_inicio_foco, analise.data_fim_foco)
             : getPeriodoLabel(analise.data_inicio_comparacao, analise.data_fim_comparacao)
 
-          // Marca como atualizado quando o último período do contrato é processado
-          if (periodo.tipo === 'comparacao') {
-            setUpdatedIds((prev) => new Set([...prev, contrato.id]))
-            setContratos((prev) =>
-              prev.map((c) => (c.id === contrato.id ? { ...c, situacao: 'atualizado' } : c)),
-            )
-            updateContratoSituacao({ contratoId: contrato.id, situacao: 'atualizado' }).catch(() => {})
-          }
+          const retrySuffix = attempt > 1 ? ` (tentativa ${attempt}/${maxAttempts})` : ''
 
           setBatchProgress({ processed, total, currentContract: contractLabel })
           setStatusMessage(
             success
-              ? `Atualizando contrato ${contractLabel} no periodo ${periodoLabel} (${processed}/${total})...`
-              : `Contrato ${contractLabel} com falha no periodo ${periodoLabel} (${processed}/${total}).`,
+              ? `Atualizando contrato ${contractLabel} no periodo ${periodoLabel}${retrySuffix} (${processed}/${total})...`
+              : `Contrato ${contractLabel} com falha no periodo ${periodoLabel}${retrySuffix} (${processed}/${total}).`,
           )
-
+        },
+        onContractComplete: ({ contrato }) => {
+          setUpdatedContratoOrder((prev) => [...prev, contrato.id])
           loadData({ silent: true })
         },
       })
+
+      const successfulIds = new Set(result.successfulContratoIds ?? [])
+      setUpdatedIds(successfulIds)
+      setContratos((prev) =>
+        prev.map((c) =>
+          successfulIds.has(c.id)
+            ? { ...c, situacao: 'atualizado' }
+            : { ...c, situacao: 'desatualizado' },
+        ),
+      )
+
+      if (successfulIds.size) {
+        await Promise.allSettled(
+          Array.from(successfulIds).map((contratoId) =>
+            updateContratoSituacao({ contratoId, situacao: 'atualizado' }),
+          ),
+        )
+      }
 
       if (result.failed) {
         setStatusMessage(`Atualizacao concluida com ${result.failed} falha(s).`)
@@ -636,6 +657,7 @@ function RemessaBoletosAnalisePage() {
       setErrorMessage(error.message || 'Nao foi possivel atualizar todos os contratos.')
     } finally {
       setBatchProgress({ processed: 0, total: 0, currentContract: '' })
+      setUpdatedContratoOrder([])
       setUpdatingAll(false)
       setUpdatedIds(new Set())
     }
@@ -1792,10 +1814,28 @@ function RemessaBoletosAnalisePage() {
       ) : null}
 
       {updatingAll ? (
-        <p className="rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm text-cyan-800">
-          Processando extratos em tempo real: {batchProgress.processed}/{batchProgress.total}
-          {batchProgress.currentContract ? ` - Contrato ${batchProgress.currentContract}` : ''}
-        </p>
+        <div className="rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-3 space-y-2">
+          <div className="flex items-center justify-between text-sm text-cyan-800">
+            <span className="font-medium">
+              {updatedContratoOrder.length} de {contratos.length} contratos atualizados
+            </span>
+            {batchProgress.currentContract ? (
+              <span className="text-xs text-slate-500">
+                Processando contrato {batchProgress.currentContract}...
+              </span>
+            ) : null}
+          </div>
+          <div className="h-2 w-full overflow-hidden rounded-full bg-cyan-100">
+            <div
+              className="h-full bg-cyan-500 transition-all duration-300 ease-out"
+              style={{
+                width: contratos.length > 0
+                  ? `${(updatedContratoOrder.length / contratos.length) * 100}%`
+                  : '0%',
+              }}
+            />
+          </div>
+        </div>
       ) : null}
 
       {analyzingAllWithIA ? (

@@ -556,6 +556,10 @@ export async function coletarExtratosParaContrato({
   ]
 
   const errors = []
+  const periodoSnapshots = {
+    foco: null,
+    comparacao: null,
+  }
 
   for (let iterationIndex = 0; iterationIndex < periodos.length; iterationIndex += 1) {
     const periodo = periodos[iterationIndex]
@@ -575,6 +579,15 @@ export async function coletarExtratosParaContrato({
             dataInicio: periodo.dataInicio,
             dataFim: periodo.dataFim,
           })
+
+          const movimentosCount = Array.isArray(normalizedExtrato.movimentos)
+            ? normalizedExtrato.movimentos.length
+            : 0
+
+          periodoSnapshots[periodo.tipo] = {
+            movimentos: movimentosCount,
+            subtotal: normalizeNumber(normalizedExtrato.subtotal),
+          }
 
           await upsertExtratoComMovimentos({
             analiseId: analise.id,
@@ -620,55 +633,128 @@ export async function coletarExtratosParaContrato({
     }
   }
 
+  const focoMovimentos = periodoSnapshots.foco?.movimentos
+  const comparacaoMovimentos = periodoSnapshots.comparacao?.movimentos
+  const inconsistentPeriods =
+    errors.length === 0 &&
+    Number.isFinite(focoMovimentos) &&
+    Number.isFinite(comparacaoMovimentos) &&
+    ((focoMovimentos === 0 && comparacaoMovimentos > 0) ||
+      (comparacaoMovimentos === 0 && focoMovimentos > 0))
+
+  if (inconsistentPeriods) {
+    const contratoLabel = contrato.codigo_contrato || contrato.codigo_cliente || '?'
+    const verificationMessage =
+      `Contrato ${contratoLabel}: verificacao identificou carregamento incompleto ` +
+      `(foco=${focoMovimentos} movimento(s), comparacao=${comparacaoMovimentos} movimento(s)).`
+
+    errors.push({
+      contrato,
+      periodo: { tipo: 'verificacao' },
+      message: verificationMessage,
+    })
+
+    if (!continueOnError) {
+      throw new Error(verificationMessage)
+    }
+  }
+
   return {
     totalIterations: periodos.length,
     failedIterations: errors.length,
+    inconsistentPeriods,
+    periodoSnapshots,
     errors,
   }
 }
 
-export async function coletarExtratosParaAnalise({ analise, contratos, onProgress }) {
+export async function coletarExtratosParaAnalise({ analise, contratos, onProgress, onContractComplete }) {
   const errors = []
   const totalIterations = contratos.length * 2
   let processedIterations = 0
+  const countedIterationKeys = new Set()
   const concurrency = resolveRemessaConcurrency()
+  const maxContractAttempts = 3
+  const retryBaseDelayMs = 600
+  const retryMaxDelayMs = 3000
 
   const resultsByContrato = await runWithConcurrency(contratos, concurrency, async (contrato) => {
-    const result = await coletarExtratosParaContrato({
-      analise,
-      contrato,
-      continueOnError: true,
-      onIteration: ({ periodo, success, errorMessage }) => {
-        processedIterations += 1
+    let attemptsUsed = 0
+    let result = null
 
-        onProgress?.({
-          processed: processedIterations,
-          total: totalIterations,
-          contrato,
-          periodo,
-          success,
-          errorMessage,
-        })
-      },
-    })
+    while (attemptsUsed < maxContractAttempts) {
+      attemptsUsed += 1
+      const currentAttempt = attemptsUsed
+
+      result = await coletarExtratosParaContrato({
+        analise,
+        contrato,
+        continueOnError: true,
+        onIteration: ({ periodo, success, errorMessage }) => {
+          const iterationKey = `${contrato.id}|${periodo.tipo}`
+          if (!countedIterationKeys.has(iterationKey)) {
+            countedIterationKeys.add(iterationKey)
+            processedIterations += 1
+          }
+
+          onProgress?.({
+            processed: processedIterations,
+            total: totalIterations,
+            contrato,
+            periodo,
+            success,
+            errorMessage,
+            attempt: currentAttempt,
+            maxAttempts: maxContractAttempts,
+          })
+        },
+      })
+
+      const shouldRetry = result.failedIterations > 0 || result.inconsistentPeriods
+      if (!shouldRetry || attemptsUsed >= maxContractAttempts) {
+        break
+      }
+
+      const delayMs = Math.min(retryMaxDelayMs, retryBaseDelayMs * 2 ** (attemptsUsed - 1))
+      await sleep(delayMs)
+    }
+
+    const contractSuccess = !(result.failedIterations > 0 || result.inconsistentPeriods)
+    onContractComplete?.({ contrato, success: contractSuccess, attemptsUsed })
 
     return {
       contrato,
       result,
+      attemptsUsed,
     }
   })
 
-  for (let index = 0; index < resultsByContrato.length; index += 1) {
-    const { contrato, result } = resultsByContrato[index]
+  const successfulContratoIds = []
+  const failedContratoIds = []
 
-    if (result.failedIterations <= 0) {
+  for (let index = 0; index < resultsByContrato.length; index += 1) {
+    const { contrato, result, attemptsUsed } = resultsByContrato[index]
+
+    const hasFailure = result.failedIterations > 0 || result.inconsistentPeriods
+    if (!hasFailure) {
+      successfulContratoIds.push(contrato.id)
       continue
     }
+
+    failedContratoIds.push(contrato.id)
+
+    const retryInfo = attemptsUsed > 1 ? ` apos ${attemptsUsed} tentativa(s)` : ''
+    const verificationInfo = result.inconsistentPeriods
+      ? ' Verificacao detectou movimentos incompletos entre os periodos.'
+      : ''
 
     errors.push({
       codigoContrato: contrato.codigo_contrato,
       codigoCliente: contrato.codigo_cliente,
-      message: `Contrato ${contrato.codigo_contrato || contrato.codigo_cliente}: falha em ${result.failedIterations} periodo(s) apos retentativas.`,
+      message:
+        `Contrato ${contrato.codigo_contrato || contrato.codigo_cliente}: ` +
+        `falha em ${result.failedIterations} etapa(s)${retryInfo}.` +
+        verificationInfo,
       details: result.errors,
     })
   }
@@ -676,6 +762,8 @@ export async function coletarExtratosParaAnalise({ analise, contratos, onProgres
   return {
     total: totalIterations,
     failed: errors.length,
+    successfulContratoIds,
+    failedContratoIds,
     errors,
   }
 }

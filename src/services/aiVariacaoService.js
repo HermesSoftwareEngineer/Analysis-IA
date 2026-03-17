@@ -37,16 +37,39 @@ function getMaxOutputTokens() {
   return Math.floor(parsed)
 }
 
+function getPlanoContaText(movimento) {
+  const codigoPlanoConta = normalizeText(
+    movimento?.dados_json?.codigoplanoconta ??
+      movimento?.dados_json?.codigoPlanoConta ??
+      movimento?.dados_json?.planoContaCodigo ??
+      '',
+  )
+  const nomePlanoConta = normalizeText(
+    movimento?.dados_json?.nomeplanoconta ??
+      movimento?.dados_json?.nomePlanoConta ??
+      movimento?.dados_json?.planoContaNome ??
+      movimento?.plano_conta ??
+      '',
+  )
+
+  if (codigoPlanoConta && nomePlanoConta) {
+    return `${codigoPlanoConta} - ${nomePlanoConta}`
+  }
+
+  return codigoPlanoConta || nomePlanoConta || '-'
+}
+
 function buildMovimentoFingerprint(movimento) {
   const codigo = normalizeText(
     movimento?.codigo ?? movimento?.dados_json?.codigodetalhe ?? movimento?.dados_json?.codigo ?? '',
   )
+  const planoConta = getPlanoContaText(movimento)
   const historico = normalizeText(movimento?.historico ?? '').toLowerCase()
   const vencimento = normalizeText(movimento?.data_vencimento ?? '')
   const pagamento = normalizeText(movimento?.data_pagamento ?? '')
   const valor = asNumber(movimento?.valor).toFixed(2)
 
-  return `${codigo}|${historico}|${vencimento}|${pagamento}|${valor}`
+  return `${codigo}|${planoConta}|${historico}|${vencimento}|${pagamento}|${valor}`
 }
 
 function dedupeMovimentos(movimentos) {
@@ -83,9 +106,10 @@ function mapMovimentosToPrompt(movimentos = [], maxItems = 80) {
       const dataVencimento = normalizeText(movimento?.data_vencimento ?? '-') || '-'
       const dataPagamento = normalizeText(movimento?.data_pagamento ?? '-') || '-'
       const codigo = normalizeText(movimento?.codigo ?? '-') || '-'
+      const planoConta = getPlanoContaText(movimento)
       const valor = formatCurrency(movimento?.valor)
 
-      return `${index + 1}. codigo=${codigo}; historico=${historico}; venc=${dataVencimento}; pag=${dataPagamento}; valor=${valor}`
+      return `${index + 1}. codigo=${codigo}; plano_conta=${planoConta}; historico=${historico}; venc=${dataVencimento}; pag=${dataPagamento}; valor=${valor}`
     })
     .join('\n')
 }
