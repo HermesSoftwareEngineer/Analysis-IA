@@ -110,6 +110,9 @@ function isTransientError(error) {
   if (
     message.includes('statement timeout') ||
     message.includes('canceling statement due to statement timeout') ||
+    message.includes(' timeout') ||
+    message.includes('timed out') ||
+    message.includes('abort') ||
     message.includes('fetch failed') ||
     message.includes('networkerror') ||
     message.includes('failed to fetch') ||
@@ -583,6 +586,15 @@ export async function coletarExtratosParaContrato({
           const movimentosCount = Array.isArray(normalizedExtrato.movimentos)
             ? normalizedExtrato.movimentos.length
             : 0
+
+          if (movimentosCount > 0 && normalizeNumber(normalizedExtrato.subtotal) === 0) {
+            console.warn('[SubtotalDebug] contrato-periodo-subtotal-zero', {
+              contrato: contrato.codigo_contrato || contrato.codigo_cliente,
+              periodo: periodo.tipo,
+              movimentosCount,
+              subtotal: normalizedExtrato.subtotal,
+            })
+          }
 
           periodoSnapshots[periodo.tipo] = {
             movimentos: movimentosCount,

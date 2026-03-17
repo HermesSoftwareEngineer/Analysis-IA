@@ -43,6 +43,80 @@ function buildContractKey(contract) {
   return `${contract.codigo_cliente}|${contract.codigo_contrato}`
 }
 
+function parseMoney(value) {
+  if (value === null || value === undefined || value === '') {
+    return 0
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : 0
+  }
+
+  let source = String(value).trim()
+  if (!source) {
+    return 0
+  }
+
+  source = source.replace(/[^\d,.-]/g, '')
+  if (!source) {
+    return 0
+  }
+
+  const hasComma = source.includes(',')
+  const hasDot = source.includes('.')
+
+  let normalized = source
+  if (hasComma && hasDot) {
+    normalized = source.lastIndexOf(',') > source.lastIndexOf('.')
+      ? source.replace(/\./g, '').replace(',', '.')
+      : source.replace(/,/g, '')
+  } else if (hasComma) {
+    normalized = source.replace(/\./g, '').replace(',', '.')
+  } else {
+    normalized = source.replace(/,/g, '')
+  }
+
+  const parsed = Number(normalized)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function resolveMoneyValue(...candidates) {
+  let found = false
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index]
+    if (candidate === null || candidate === undefined || String(candidate).trim() === '') {
+      continue
+    }
+
+    found = true
+    const parsed = parseMoney(candidate)
+    if (parsed !== 0) {
+      return parsed
+    }
+  }
+
+  return found ? 0 : 0
+}
+
+function getMovimentoValor(movimento) {
+  return resolveMoneyValue(
+    movimento?.valor,
+    movimento?.dados_json?.valor,
+    movimento?.dados_json?.valordetalhe,
+    movimento?.dados_json?.valorDetalhe,
+    movimento?.dados_json?.saldo,
+    movimento?.dados_json?.valorliquido,
+    movimento?.dados_json?.valorLiquido,
+    movimento?.dados_json?.valorbruto,
+    movimento?.dados_json?.valorBruto,
+  )
+}
+
+function isNearlyZeroMoney(value) {
+  return Math.abs(parseMoney(value)) < 0.005
+}
+
 function buildMovimentoFingerprint(movimento) {
   const codigo = String(
     movimento?.codigo ?? movimento?.dados_json?.codigodetalhe ?? movimento?.dados_json?.codigo ?? '',
@@ -56,7 +130,7 @@ function buildMovimentoFingerprint(movimento) {
     .trim()
     .toLowerCase()
   const historico = String(movimento?.historico ?? '').trim().toLowerCase()
-  const valor = Number(movimento?.valor ?? 0).toFixed(2)
+  const valor = getMovimentoValor(movimento).toFixed(2)
   const vencimento = String(movimento?.data_vencimento ?? '').trim()
   const pagamento = String(movimento?.data_pagamento ?? '').trim()
 
@@ -85,7 +159,7 @@ function dedupeMovimentos(movimentos) {
 }
 
 function sumMovimentos(movimentos) {
-  return movimentos.reduce((total, movimento) => total + Number(movimento?.valor ?? 0), 0)
+  return movimentos.reduce((total, movimento) => total + getMovimentoValor(movimento), 0)
 }
 
 function findExtratoForPeriodo({ extratos, contrato, periodoTipo }) {
@@ -347,12 +421,18 @@ function RemessaBoletosAnalisePage() {
 
       const movimentosFoco = dedupeMovimentos(focoExtrato?.movimentos_boletos ?? [])
       const movimentosComparacao = dedupeMovimentos(comparacaoExtrato?.movimentos_boletos ?? [])
-      const subtotalFoco = movimentosFoco.length
-        ? sumMovimentos(movimentosFoco)
-        : Number(focoExtrato?.subtotal ?? 0)
-      const subtotalComparacao = movimentosComparacao.length
-        ? sumMovimentos(movimentosComparacao)
-        : Number(comparacaoExtrato?.subtotal ?? 0)
+      const somaMovimentosFoco = sumMovimentos(movimentosFoco)
+      const somaMovimentosComparacao = sumMovimentos(movimentosComparacao)
+      const subtotalFoco = movimentosFoco.length > 0 && isNearlyZeroMoney(somaMovimentosFoco)
+        ? resolveMoneyValue(focoExtrato?.subtotal, somaMovimentosFoco)
+        : movimentosFoco.length > 0
+          ? somaMovimentosFoco
+          : resolveMoneyValue(focoExtrato?.subtotal)
+      const subtotalComparacao = movimentosComparacao.length > 0 && isNearlyZeroMoney(somaMovimentosComparacao)
+        ? resolveMoneyValue(comparacaoExtrato?.subtotal, somaMovimentosComparacao)
+        : movimentosComparacao.length > 0
+          ? somaMovimentosComparacao
+          : resolveMoneyValue(comparacaoExtrato?.subtotal)
 
       return {
         contrato,
@@ -669,36 +749,56 @@ function RemessaBoletosAnalisePage() {
     }
 
     const rowKey = buildContractKey(contrato)
+    const maxSingleAttempts = 3
+
     setUpdatingContractKey(rowKey)
     setStatusMessage('')
     setErrorMessage('')
 
     try {
-      const result = await coletarExtratosParaContrato({
-        analise,
-        contrato,
-        continueOnError: true,
-        onIteration: ({ periodo, iterationIndex, totalIterations, success }) => {
-          const periodLabel = periodo.tipo === 'foco'
-            ? getPeriodoLabel(analise.data_inicio_foco, analise.data_fim_foco)
-            : getPeriodoLabel(analise.data_inicio_comparacao, analise.data_fim_comparacao)
+      let attemptsUsed = 0
+      let result = null
 
-          setStatusMessage(
-            success
-              ? `Atualizando contrato ${contrato.codigo_contrato || contrato.codigo_cliente} em ${periodLabel} (${iterationIndex}/${totalIterations})...`
-              : `Falha ao atualizar contrato ${contrato.codigo_contrato || contrato.codigo_cliente} em ${periodLabel} (${iterationIndex}/${totalIterations}).`,
-          )
+      while (attemptsUsed < maxSingleAttempts) {
+        attemptsUsed += 1
+        const currentAttempt = attemptsUsed
 
-          loadData({ silent: true })
-        },
-      })
+        result = await coletarExtratosParaContrato({
+          analise,
+          contrato,
+          continueOnError: true,
+          onIteration: ({ periodo, iterationIndex, totalIterations, success, errorMessage }) => {
+            const periodLabel = periodo.tipo === 'foco'
+              ? getPeriodoLabel(analise.data_inicio_foco, analise.data_fim_foco)
+              : getPeriodoLabel(analise.data_inicio_comparacao, analise.data_fim_comparacao)
+            const retrySuffix = currentAttempt > 1 ? ` (tentativa ${currentAttempt}/${maxSingleAttempts})` : ''
 
-      if (result.failedIterations > 0) {
+            setStatusMessage(
+              success
+                ? `Atualizando contrato ${contrato.codigo_contrato || contrato.codigo_cliente} em ${periodLabel}${retrySuffix} (${iterationIndex}/${totalIterations})...`
+                : `Falha ao atualizar contrato ${contrato.codigo_contrato || contrato.codigo_cliente} em ${periodLabel}${retrySuffix} (${iterationIndex}/${totalIterations}).`,
+            )
+
+            loadData({ silent: true })
+          },
+        })
+
+        const shouldRetry = result.failedIterations > 0 || result.inconsistentPeriods
+
+        if (!shouldRetry || currentAttempt >= maxSingleAttempts) {
+          break
+        }
+      }
+
+      if ((result?.failedIterations ?? 0) > 0) {
+        setStatusMessage(
+          `Atualizacao do contrato ${contrato.codigo_contrato || contrato.codigo_cliente} concluida com ${result.failedIterations} falha(s) apos ${maxSingleAttempts} tentativa(s).`,
+        )
         setErrorMessage(
           `Contrato ${contrato.codigo_contrato || contrato.codigo_cliente} finalizou com ${result.failedIterations} falha(s).`,
         )
       } else {
-        setStatusMessage(`Contrato ${contrato.codigo_contrato || contrato.codigo_cliente} atualizado.`)
+        setStatusMessage(`Atualizacao do contrato ${contrato.codigo_contrato || contrato.codigo_cliente} concluida.`)
       }
 
       updateContratoSituacao({ contratoId: contrato.id, situacao: 'atualizado' }).catch(() => {})
